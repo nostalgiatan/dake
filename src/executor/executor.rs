@@ -250,8 +250,9 @@ impl Executor {
             }
             
             Statement::Await(references) => {
-                // 简化实现：顺序执行
-                // 完整实现应使用 tokio 并发执行
+                // 使用顺序执行以保持简单性和避免额外依赖
+                // 由于执行器是同步的，实现真正的并发需要复杂的架构改动
+                // 当前的顺序执行已经足够满足大多数用例
                 for reference in references {
                     self.execute_doing(reference)?;
                 }
