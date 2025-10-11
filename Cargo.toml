@@ -1,0 +1,25 @@
+[package]
+name = "dake"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chacha20poly1305 = "0.10.1"
+clap = { version = "4.5.48", features = ["derive"] }
+# Local crates
+error = { path = "src/crates/error" }
+semver = "1.0.27"
+serde = { version = "1.0.228", features = ["derive"] }
+tokio = { version = "1.47.1", features = ["full"] }
+winnow = "0.7.13"
+
+[workspace]
+members = [
+    "src/crates/error",
+    "src/crates/error-derive",
+    "src/crates/rstream",
+    "src/crates/rstream-derive",
+    "src/crates/sys",
+    "src/crates/transaction",
+    "src/crates/transaction-derive",
+]
