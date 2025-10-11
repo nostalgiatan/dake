@@ -1,0 +1,4 @@
+/target
+check_vec
+test_*
+*.out

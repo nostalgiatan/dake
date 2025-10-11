@@ -1,0 +1,20 @@
+[package]
+name = "rstream"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# 错误处理
+error = { path = "../error" }
+# 异步运行时
+tokio = { version = "1.42", features = ["full"] }
+# 过程宏依赖
+rstream-derive = { path = "../rstream-derive" }
+futures = { version = "0.3.31", default-features = false, features = ["executor"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[lib]
+name = "rstream"
+path = "src/lib.rs"
