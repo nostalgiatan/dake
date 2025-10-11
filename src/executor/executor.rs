@@ -417,7 +417,64 @@ impl Executor {
             BinaryOp::Or => {
                 Ok(self.evaluate_expression(left)? || self.evaluate_expression(right)?)
             }
-            _ => Err(ExecutionError::new(4004, format!("不支持的操作符: {:?}", op))),
+            // 比较操作符 - 需要先求值为 Value
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Gt | BinaryOp::Lt | BinaryOp::Ge | BinaryOp::Le => {
+                let left_val = self.evaluate_value(left)?;
+                let right_val = self.evaluate_value(right)?;
+                self.compare_values(op, &left_val, &right_val)
+            }
+        }
+    }
+    
+    /// 评估表达式得到 Value
+    fn evaluate_value(&self, expr: &Expression) -> Result<Value, ExecutionError> {
+        match expr {
+            Expression::Literal(val) => Ok(val.clone()),
+            Expression::Variable(name) => {
+                self.context.get(name)
+                    .ok_or_else(|| ExecutionError::new(4002, format!("未定义的变量: {}", name)))
+            }
+            _ => Err(ExecutionError::new(4005, "表达式类型不支持作为值使用".to_string())),
+        }
+    }
+    
+    /// 比较两个值
+    fn compare_values(&self, op: &BinaryOp, left: &Value, right: &Value) -> Result<bool, ExecutionError> {
+        match (left, right) {
+            // 数字比较
+            (Value::Number(l), Value::Number(r)) => {
+                Ok(match op {
+                    BinaryOp::Eq => l == r,
+                    BinaryOp::Ne => l != r,
+                    BinaryOp::Gt => l > r,
+                    BinaryOp::Lt => l < r,
+                    BinaryOp::Ge => l >= r,
+                    BinaryOp::Le => l <= r,
+                    _ => return Err(ExecutionError::new(4004, format!("不支持的操作符: {:?}", op))),
+                })
+            }
+            // 字符串比较
+            (Value::String(l), Value::String(r)) => {
+                Ok(match op {
+                    BinaryOp::Eq => l == r,
+                    BinaryOp::Ne => l != r,
+                    BinaryOp::Gt => l > r,
+                    BinaryOp::Lt => l < r,
+                    BinaryOp::Ge => l >= r,
+                    BinaryOp::Le => l <= r,
+                    _ => return Err(ExecutionError::new(4004, format!("不支持的操作符: {:?}", op))),
+                })
+            }
+            // 布尔值比较（只支持 == 和 !=）
+            (Value::Bool(l), Value::Bool(r)) => {
+                Ok(match op {
+                    BinaryOp::Eq => l == r,
+                    BinaryOp::Ne => l != r,
+                    _ => return Err(ExecutionError::new(4006, format!("布尔值不支持 {:?} 操作", op))),
+                })
+            }
+            // 类型不匹配
+            _ => Err(ExecutionError::new(4007, format!("无法比较不同类型的值: {:?} 和 {:?}", left, right))),
         }
     }
     

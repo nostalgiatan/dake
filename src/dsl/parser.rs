@@ -195,13 +195,18 @@ impl Parser {
     /// 解析代码块（缩进敏感）
     fn parse_block(&mut self) -> Result<Vec<Statement>, ParseError> {
         let mut statements = Vec::new();
+        let mut parsed_first = false;
         
         // 简化实现：解析直到遇到 ELIF, ELSE 或下一个顶层语句
         while !self.is_at_end() 
             && !self.match_token(&Token::Elif) 
             && !self.match_token(&Token::Else)
-            && !self.is_block_terminator()
         {
+            // 只有在至少解析了一个语句后，才检查块终止符
+            if parsed_first && self.is_block_terminator() {
+                break;
+            }
+            
             if self.match_token(&Token::Newline) {
                 self.advance();
                 continue;
@@ -214,6 +219,7 @@ impl Parser {
             
             let stmt = self.parse_statement()?;
             statements.push(stmt);
+            parsed_first = true;
         }
         
         Ok(statements)
@@ -221,10 +227,8 @@ impl Parser {
     
     /// 检查是否是控制流块的终止符
     fn is_block_terminator(&self) -> bool {
-        matches!(
-            self.current(),
-            Token::Set | Token::If | Token::Lib | Token::Repo
-        )
+        // 检查所有顶层关键字，以及 Lib 和 Repo（这些会终止代码块）
+        self.is_top_level_keyword() || matches!(self.current(), Token::Lib | Token::Repo)
     }
     
     /// 检查是否是顶层关键字（用于确定语句块结束）
