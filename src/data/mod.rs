@@ -7,4 +7,4 @@
 
 pub mod regex_cache;
 
-pub use regex_cache::{RegexCache, RegexError};
+pub use regex_cache::RegexCache;

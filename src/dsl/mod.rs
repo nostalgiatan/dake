@@ -14,6 +14,8 @@ pub mod lexer;
 pub mod parser;
 
 // 重新导出核心类型
-pub use ast::{Ast, Statement, Expression, Value, ControlFlow};
-pub use lexer::{Token, Lexer};
-pub use parser::{Parser, ParseError};
+#[allow(unused_imports)]
+pub use ast::{Ast, Statement};
+#[allow(unused_imports)]
+pub use lexer::Lexer;
+pub use parser::Parser;

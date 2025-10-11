@@ -14,11 +14,13 @@ use std::sync::{Arc, RwLock};
 ///
 /// 用于表示正则表达式相关的错误
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct RegexError {
     code: u32,
     message: String,
 }
 
+#[allow(dead_code)]
 impl RegexError {
     /// 创建新的正则表达式错误
     ///
@@ -155,6 +157,7 @@ impl RegexCache {
     ///
     /// # 错误
     /// * 错误码 2003 - 获取写锁失败
+    #[allow(dead_code)]
     pub fn clear(&self) -> Result<()> {
         let mut cache_write = self.cache.write().map_err(|e| {
             ErrorInfo::new(
@@ -176,6 +179,7 @@ impl RegexCache {
     ///
     /// # 错误
     /// * 错误码 2002 - 获取读锁失败
+    #[allow(dead_code)]
     pub fn size(&self) -> Result<usize> {
         let cache_read = self.cache.read().map_err(|e| {
             ErrorInfo::new(
@@ -197,6 +201,7 @@ impl RegexCache {
     ///
     /// # 错误
     /// * 错误码 2002 - 获取读锁失败
+    #[allow(dead_code)]
     pub fn contains(&self, pattern: &str) -> Result<bool> {
         let cache_read = self.cache.read().map_err(|e| {
             ErrorInfo::new(

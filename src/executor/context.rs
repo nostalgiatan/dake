@@ -34,6 +34,7 @@ impl ExecutionContext {
     }
     
     /// 创建带父级的子上下文
+    #[allow(dead_code)]
     pub fn with_parent(parent: ExecutionContext) -> Self {
         Self {
             local_vars: HashMap::new(),
@@ -131,6 +132,7 @@ impl ExecutionContext {
     }
     
     /// 检查变量是否存在
+    #[allow(dead_code)]
     pub fn contains(&self, key: &str) -> bool {
         self.get(key).is_some()
     }

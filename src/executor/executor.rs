@@ -8,7 +8,6 @@
 use crate::dsl::ast::*;
 use crate::executor::context::ExecutionContext;
 use crate::executor::crypto::CryptoOperations;
-use crate::executor::file_ops::FileOperations;
 use crate::data::RegexCache;
 use error::{ErrorInfo, ErrorCategory, ErrorSeverity};
 use std::fmt;
@@ -31,6 +30,7 @@ impl ExecutionError {
     }
     
     /// 带上下文的执行错误
+    #[allow(dead_code)]
     pub fn with_context(code: u32, message: String, context: String) -> Self {
         Self {
             info: ErrorInfo::new(code, message)
@@ -78,6 +78,7 @@ pub struct Executor {
 
 /// 数据操作定义
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DataOpDef {
     name: String,
     file: String,
@@ -86,6 +87,7 @@ struct DataOpDef {
 
 /// 数据管道定义
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DataPipeDef {
     name: String,
     operations: Vec<PipeOperation>,
@@ -93,6 +95,7 @@ struct DataPipeDef {
 
 /// 命令定义
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CommandDef {
     name: String,
     statements: Vec<Statement>,
@@ -100,6 +103,7 @@ struct CommandDef {
 
 /// 错误定义
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ErrorDef {
     name: String,
     print: String,
@@ -421,6 +425,7 @@ impl Executor {
     }
     
     /// 获取输出缓冲区（用于测试）
+    #[allow(dead_code)]
     pub fn output(&self) -> &[String] {
         &self.output_buffer
     }

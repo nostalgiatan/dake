@@ -15,12 +15,14 @@ use std::fmt;
 
 /// 加密错误
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct CryptoError {
     info: ErrorInfo,
 }
 
 impl CryptoError {
     /// 创建新的加密错误
+    #[allow(dead_code)]
     pub fn new(code: u32, message: String) -> Self {
         Self {
             info: ErrorInfo::new(code, message)
@@ -39,6 +41,7 @@ impl fmt::Display for CryptoError {
 impl std::error::Error for CryptoError {}
 
 /// 加密操作
+#[allow(dead_code)]
 pub struct CryptoOperations {
     /// 密钥（32 字节）
     key: [u8; 32],
@@ -47,6 +50,7 @@ pub struct CryptoOperations {
     deterministic: bool,
 }
 
+#[allow(dead_code)]
 impl CryptoOperations {
     /// 创建新的加密操作实例
     ///

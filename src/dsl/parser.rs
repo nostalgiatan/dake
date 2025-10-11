@@ -27,6 +27,7 @@ impl ParseError {
     }
     
     /// 带上下文的解析错误
+    #[allow(dead_code)]
     pub fn with_context(code: u32, message: String, context: String) -> Self {
         Self {
             info: ErrorInfo::new(code, message)
