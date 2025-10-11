@@ -8,7 +8,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
 mod dsl;
-// mod executor; // 暂时注释，等实现后再启用
+mod executor;
 mod cli;
 
 /// dake - 数据处理和打包工具
@@ -63,4 +63,10 @@ fn main() {
             cli::show_ast(&file);
         }
     }
+}
+
+// 测试模块
+#[cfg(test)]
+mod tests {
+    // DSL 测试在各自的模块中
 }

@@ -7,6 +7,7 @@
 use std::path::Path;
 use std::fs;
 use crate::dsl::Parser;
+use crate::executor::Executor;
 
 /// 运行 DSL 文件
 pub fn run_file(file: &Path, verbose: bool) {
@@ -23,23 +24,35 @@ pub fn run_file(file: &Path, verbose: bool) {
                             if verbose {
                                 println!("解析成功，包含 {} 个语句", ast.statements.len());
                             }
-                            // TODO: 执行 AST
-                            println!("执行功能尚未实现");
+                            
+                            // 执行 AST
+                            let mut executor = Executor::new();
+                            match executor.execute(&ast) {
+                                Ok(()) => {
+                                    if verbose {
+                                        println!("✓ 执行成功");
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("✗ 执行错误: {}", e);
+                                    std::process::exit(1);
+                                }
+                            }
                         }
                         Err(e) => {
-                            eprintln!("解析错误: {}", e);
+                            eprintln!("✗ 解析错误: {}", e);
                             std::process::exit(1);
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("创建解析器失败: {}", e);
+                    eprintln!("✗ 创建解析器失败: {}", e);
                     std::process::exit(1);
                 }
             }
         }
         Err(e) => {
-            eprintln!("读取文件失败: {}", e);
+            eprintln!("✗ 读取文件失败: {}", e);
             std::process::exit(1);
         }
     }

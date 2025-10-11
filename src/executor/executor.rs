@@ -1,0 +1,473 @@
+/*
+ * 执行器 (Executor)
+ *
+ * 执行解析后的 AST。
+ * 处理变量解析、控制流、数据操作等。
+ */
+
+use crate::dsl::ast::*;
+use crate::executor::context::ExecutionContext;
+use crate::executor::crypto::CryptoOperations;
+use crate::executor::file_ops::FileOperations;
+use error::{ErrorInfo, ErrorCategory, ErrorSeverity};
+use std::fmt;
+use std::collections::HashMap;
+
+/// 执行错误
+#[derive(Debug)]
+pub struct ExecutionError {
+    info: ErrorInfo,
+}
+
+impl ExecutionError {
+    /// 创建新的执行错误
+    pub fn new(code: u32, message: String) -> Self {
+        Self {
+            info: ErrorInfo::new(code, message)
+                .with_category(ErrorCategory::System)
+                .with_severity(ErrorSeverity::Error),
+        }
+    }
+    
+    /// 带上下文的执行错误
+    pub fn with_context(code: u32, message: String, context: String) -> Self {
+        Self {
+            info: ErrorInfo::new(code, message)
+                .with_category(ErrorCategory::System)
+                .with_severity(ErrorSeverity::Error)
+                .with_context(context),
+        }
+    }
+}
+
+impl fmt::Display for ExecutionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.info)
+    }
+}
+
+impl std::error::Error for ExecutionError {}
+
+/// 执行器
+pub struct Executor {
+    /// 执行上下文
+    context: ExecutionContext,
+    
+    /// 数据操作定义
+    data_ops: HashMap<String, DataOpDef>,
+    
+    /// 数据管道定义
+    data_pipes: HashMap<String, DataPipeDef>,
+    
+    /// 命令定义
+    commands: HashMap<String, CommandDef>,
+    
+    /// 错误定义
+    errors: HashMap<String, ErrorDef>,
+    
+    /// 加密操作
+    crypto: Option<CryptoOperations>,
+    
+    /// 输出缓冲区（用于测试）
+    output_buffer: Vec<String>,
+}
+
+/// 数据操作定义
+#[derive(Debug, Clone)]
+struct DataOpDef {
+    name: String,
+    file: String,
+    action: String,
+}
+
+/// 数据管道定义
+#[derive(Debug, Clone)]
+struct DataPipeDef {
+    name: String,
+    operations: Vec<PipeOperation>,
+}
+
+/// 命令定义
+#[derive(Debug, Clone)]
+struct CommandDef {
+    name: String,
+    statements: Vec<Statement>,
+}
+
+/// 错误定义
+#[derive(Debug, Clone)]
+struct ErrorDef {
+    name: String,
+    print: String,
+}
+
+impl Executor {
+    /// 创建新的执行器
+    pub fn new() -> Self {
+        Self {
+            context: ExecutionContext::new(),
+            data_ops: HashMap::new(),
+            data_pipes: HashMap::new(),
+            commands: HashMap::new(),
+            errors: HashMap::new(),
+            crypto: None,
+            output_buffer: Vec::new(),
+        }
+    }
+    
+    /// 执行 AST
+    pub fn execute(&mut self, ast: &Ast) -> Result<(), ExecutionError> {
+        for statement in &ast.statements {
+            self.execute_statement(statement)?;
+        }
+        Ok(())
+    }
+    
+    /// 执行单个语句
+    fn execute_statement(&mut self, stmt: &Statement) -> Result<(), ExecutionError> {
+        match stmt {
+            Statement::Set { key, value } => {
+                self.context.set_local(key.clone(), value.clone());
+                Ok(())
+            }
+            
+            Statement::SetEnv { key, value } => {
+                self.context.set_env(key.clone(), value.clone());
+                Ok(())
+            }
+            
+            Statement::ControlFlow(cf) => {
+                self.execute_control_flow(cf)
+            }
+            
+            Statement::Lib(lib_def) => {
+                // 记录 lib 定义（实际打包功能需要进一步实现）
+                self.output_buffer.push(format!("定义数据包: {}", lib_def.name));
+                Ok(())
+            }
+            
+            Statement::Repo(repo_def) => {
+                // 记录 repo 定义
+                self.output_buffer.push(format!("定义仓库: {}", repo_def.name));
+                Ok(())
+            }
+            
+            Statement::LogInit { dir, print } => {
+                self.output_buffer.push(format!("初始化日志: dir={}, print={}", dir, print));
+                Ok(())
+            }
+            
+            Statement::ErrorDef { name, print } => {
+                self.errors.insert(
+                    name.clone(),
+                    ErrorDef {
+                        name: name.clone(),
+                        print: print.clone(),
+                    },
+                );
+                Ok(())
+            }
+            
+            Statement::DataDo { name, file, action } => {
+                self.data_ops.insert(
+                    name.clone(),
+                    DataOpDef {
+                        name: name.clone(),
+                        file: file.clone(),
+                        action: action.clone(),
+                    },
+                );
+                Ok(())
+            }
+            
+            Statement::DataPipe { name, operations } => {
+                self.data_pipes.insert(
+                    name.clone(),
+                    DataPipeDef {
+                        name: name.clone(),
+                        operations: operations.clone(),
+                    },
+                );
+                Ok(())
+            }
+            
+            Statement::Comm { name, action_name } => {
+                self.output_buffer.push(format!("定义命令: {} -> {}", name, action_name));
+                Ok(())
+            }
+            
+            Statement::CommAction { name, statements } => {
+                let cmd_name = name.clone().unwrap_or_else(|| "anonymous".to_string());
+                self.commands.insert(
+                    cmd_name.clone(),
+                    CommandDef {
+                        name: cmd_name,
+                        statements: statements.clone(),
+                    },
+                );
+                Ok(())
+            }
+            
+            Statement::Print(msg) => {
+                let interpolated = self.context.interpolate(msg);
+                println!("{}", interpolated);
+                self.output_buffer.push(interpolated);
+                Ok(())
+            }
+            
+            Statement::Doing(reference) => {
+                self.execute_doing(reference)
+            }
+            
+            Statement::Await(references) => {
+                // 简化实现：顺序执行
+                // 完整实现应使用 tokio 并发执行
+                for reference in references {
+                    self.execute_doing(reference)?;
+                }
+                Ok(())
+            }
+            
+            Statement::Files(paths) => {
+                self.output_buffer.push(format!("处理 {} 个文件", paths.len()));
+                for path in paths {
+                    let path_str = self.resolve_file_path(path)?;
+                    self.output_buffer.push(format!("  - {}", path_str));
+                }
+                Ok(())
+            }
+            
+            Statement::FilesAll { exclude } => {
+                self.output_buffer.push(format!("递归处理文件，排除: {:?}", exclude));
+                Ok(())
+            }
+            
+            Statement::FilesEncry => {
+                // 初始化加密操作
+                let (crypto, key) = CryptoOperations::new(true); // deterministic 模式
+                self.output_buffer.push(format!("启用文件加密，密钥长度: {}", key.len()));
+                self.crypto = Some(crypto);
+                Ok(())
+            }
+            
+            Statement::LogInfo(msg) => {
+                let interpolated = self.context.interpolate(msg);
+                self.output_buffer.push(format!("[INFO] {}", interpolated));
+                Ok(())
+            }
+            
+            Statement::LogError(error_ref) => {
+                self.output_buffer.push(format!("[ERROR] {}", error_ref));
+                Ok(())
+            }
+            
+            Statement::CommCmd { exec, args } => {
+                self.output_buffer.push(format!("执行命令: {} {:?}", exec, args));
+                Ok(())
+            }
+            
+            Statement::Catch { error_name, statements } => {
+                // 简化实现：直接执行 statements
+                // 完整实现应处理错误捕获
+                for stmt in statements {
+                    if let Err(e) = self.execute_statement(stmt) {
+                        self.output_buffer.push(format!("捕获错误 {}: {}", error_name, e));
+                    }
+                }
+                Ok(())
+            }
+            
+            Statement::Comment(_) => {
+                // 忽略注释
+                Ok(())
+            }
+        }
+    }
+    
+    /// 执行控制流
+    fn execute_control_flow(&mut self, cf: &ControlFlow) -> Result<(), ExecutionError> {
+        // 评估 IF 条件
+        if self.evaluate_expression(&cf.if_branch.0)? {
+            for stmt in &cf.if_branch.1 {
+                self.execute_statement(stmt)?;
+            }
+            return Ok(());
+        }
+        
+        // 评估 ELIF 分支
+        for (condition, statements) in &cf.elif_branches {
+            if self.evaluate_expression(condition)? {
+                for stmt in statements {
+                    self.execute_statement(stmt)?;
+                }
+                return Ok(());
+            }
+        }
+        
+        // 执行 ELSE 分支
+        if let Some(else_statements) = &cf.else_branch {
+            for stmt in else_statements {
+                self.execute_statement(stmt)?;
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// 评估表达式
+    fn evaluate_expression(&self, expr: &Expression) -> Result<bool, ExecutionError> {
+        match expr {
+            Expression::Literal(Value::Bool(b)) => Ok(*b),
+            
+            Expression::Variable(name) => {
+                match self.context.get(name) {
+                    Some(Value::Bool(b)) => Ok(b),
+                    Some(_) => Err(ExecutionError::new(4001, format!("变量 {} 不是布尔值", name))),
+                    None => Err(ExecutionError::new(4002, format!("未定义的变量: {}", name))),
+                }
+            }
+            
+            Expression::Binary { op, left, right } => {
+                self.evaluate_binary_op(op, left, right)
+            }
+            
+            Expression::Unary { op, expr } => {
+                match op {
+                    UnaryOp::Not => Ok(!self.evaluate_expression(expr)?),
+                }
+            }
+            
+            _ => Err(ExecutionError::new(4003, "不支持的表达式类型".to_string())),
+        }
+    }
+    
+    /// 评估二元操作
+    fn evaluate_binary_op(
+        &self,
+        op: &BinaryOp,
+        left: &Expression,
+        right: &Expression,
+    ) -> Result<bool, ExecutionError> {
+        match op {
+            BinaryOp::And => {
+                Ok(self.evaluate_expression(left)? && self.evaluate_expression(right)?)
+            }
+            BinaryOp::Or => {
+                Ok(self.evaluate_expression(left)? || self.evaluate_expression(right)?)
+            }
+            _ => Err(ExecutionError::new(4004, format!("不支持的操作符: {:?}", op))),
+        }
+    }
+    
+    /// 执行 DOING
+    fn execute_doing(&mut self, reference: &str) -> Result<(), ExecutionError> {
+        if let Some(pipe) = self.data_pipes.get(reference).cloned() {
+            self.output_buffer.push(format!("执行管道: {}", pipe.name));
+            return Ok(());
+        }
+        
+        if let Some(cmd) = self.commands.get(reference).cloned() {
+            for stmt in &cmd.statements {
+                self.execute_statement(stmt)?;
+            }
+            return Ok(());
+        }
+        
+        Err(ExecutionError::new(
+            4005,
+            format!("未找到操作或命令: {}", reference),
+        ))
+    }
+    
+    /// 解析文件路径（处理变量插值）
+    fn resolve_file_path(&self, path: &FilePath) -> Result<String, ExecutionError> {
+        let mut result = String::new();
+        
+        for segment in &path.segments {
+            match segment {
+                PathSegment::Literal(s) => result.push_str(s),
+                PathSegment::Variable(var) => {
+                    if let Some(value) = self.context.get(var) {
+                        result.push_str(&value.to_string().trim_matches('"'));
+                    } else {
+                        return Err(ExecutionError::new(
+                            4006,
+                            format!("路径中的变量未定义: {}", var),
+                        ));
+                    }
+                }
+            }
+        }
+        
+        Ok(result)
+    }
+    
+    /// 获取输出缓冲区（用于测试）
+    pub fn output(&self) -> &[String] {
+        &self.output_buffer
+    }
+}
+
+impl Default for Executor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_set_and_print() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::Set {
+                    key: "NAME".to_string(),
+                    value: Value::String("Alice".to_string()),
+                },
+                Statement::Print("Hello ${NAME}!".to_string()),
+            ],
+        };
+        
+        executor.execute(&ast).expect("执行失败");
+        
+        assert_eq!(executor.output().len(), 1);
+        assert!(executor.output()[0].contains("Alice"));
+    }
+
+    #[test]
+    fn test_control_flow() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![Statement::ControlFlow(ControlFlow {
+                if_branch: (
+                    Expression::Literal(Value::Bool(true)),
+                    vec![Statement::Print("条件为真".to_string())],
+                ),
+                elif_branches: vec![],
+                else_branch: Some(vec![Statement::Print("条件为假".to_string())]),
+            })],
+        };
+        
+        executor.execute(&ast).expect("执行失败");
+        
+        assert!(executor.output()[0].contains("条件为真"));
+    }
+
+    #[test]
+    fn test_file_encryption() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![Statement::FilesEncry],
+        };
+        
+        executor.execute(&ast).expect("执行失败");
+        
+        assert!(executor.crypto.is_some());
+    }
+}
