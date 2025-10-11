@@ -478,14 +478,47 @@ impl Executor {
         }
     }
     
+    /// 规范化引用名称
+    /// 
+    /// 将 "DATA.PIPE.name"、"DATA.DO.name"、"COMM.ACTION.name" 等完整引用
+    /// 转换为简单名称 "name"，以便在 HashMap 中查找
+    /// 
+    /// # 参数
+    /// - `reference`: 引用字符串，可能包含前缀
+    /// 
+    /// # 返回值
+    /// 规范化后的名称
+    fn normalize_reference(reference: &str) -> &str {
+        // 支持的前缀列表
+        const PREFIXES: &[&str] = &[
+            "DATA.PIPE.",
+            "DATA.DO.",
+            "COMM.ACTION.",
+            "COMM.",
+        ];
+        
+        // 尝试剥离已知前缀
+        for prefix in PREFIXES {
+            if let Some(stripped) = reference.strip_prefix(prefix) {
+                return stripped;
+            }
+        }
+        
+        // 如果没有匹配的前缀，返回原始引用
+        reference
+    }
+    
     /// 执行 DOING
     fn execute_doing(&mut self, reference: &str) -> Result<(), ExecutionError> {
-        if let Some(pipe) = self.data_pipes.get(reference).cloned() {
+        // 规范化引用名称
+        let normalized = Self::normalize_reference(reference);
+        
+        if let Some(pipe) = self.data_pipes.get(normalized).cloned() {
             self.output_buffer.push(format!("执行管道: {}", pipe.name));
             return Ok(());
         }
         
-        if let Some(cmd) = self.commands.get(reference).cloned() {
+        if let Some(cmd) = self.commands.get(normalized).cloned() {
             for stmt in &cmd.statements {
                 self.execute_statement(stmt)?;
             }
@@ -819,5 +852,167 @@ mod tests {
         // 应该返回错误，因为不能比较不同类型
         let result = executor.execute(&ast);
         assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_doing_with_data_pipe_reference() {
+        let mut executor = Executor::new();
+        
+        // 定义一个 DATA.PIPE
+        let ast = Ast {
+            statements: vec![
+                Statement::DataPipe {
+                    name: "process".to_string(),
+                    operations: vec![],
+                },
+                // 使用完整引用调用管道
+                Statement::Doing("DATA.PIPE.process".to_string()),
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "DOING(DATA.PIPE.process) 应该能找到名为 'process' 的管道");
+        assert_eq!(executor.output().len(), 1);
+        assert!(executor.output()[0].contains("执行管道: process"));
+    }
+    
+    #[test]
+    fn test_doing_with_comm_action_reference() {
+        let mut executor = Executor::new();
+        
+        // 定义一个 COMM.ACTION
+        let ast = Ast {
+            statements: vec![
+                Statement::CommAction {
+                    name: Some("test_action".to_string()),
+                    statements: vec![
+                        Statement::Print("Action executed".to_string()),
+                    ],
+                },
+                // 使用完整引用调用动作
+                Statement::Doing("COMM.ACTION.test_action".to_string()),
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "DOING(COMM.ACTION.test_action) 应该能找到名为 'test_action' 的动作");
+        assert_eq!(executor.output().len(), 1);
+        assert!(executor.output()[0].contains("Action executed"));
+    }
+    
+    #[test]
+    fn test_doing_with_simple_reference() {
+        let mut executor = Executor::new();
+        
+        // 定义一个管道，使用简单名称调用
+        let ast = Ast {
+            statements: vec![
+                Statement::DataPipe {
+                    name: "simple".to_string(),
+                    operations: vec![],
+                },
+                // 使用简单名称调用
+                Statement::Doing("simple".to_string()),
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "DOING(simple) 应该能找到名为 'simple' 的管道");
+        assert_eq!(executor.output().len(), 1);
+        assert!(executor.output()[0].contains("执行管道: simple"));
+    }
+    
+    #[test]
+    fn test_normalize_reference() {
+        // 测试 DATA.PIPE 前缀
+        assert_eq!(Executor::normalize_reference("DATA.PIPE.process"), "process");
+        
+        // 测试 DATA.DO 前缀
+        assert_eq!(Executor::normalize_reference("DATA.DO.operation"), "operation");
+        
+        // 测试 COMM.ACTION 前缀
+        assert_eq!(Executor::normalize_reference("COMM.ACTION.test"), "test");
+        
+        // 测试 COMM 前缀
+        assert_eq!(Executor::normalize_reference("COMM.command"), "command");
+        
+        // 测试没有前缀的情况
+        assert_eq!(Executor::normalize_reference("simple"), "simple");
+        
+        // 测试包含点的名称（但不匹配前缀）
+        assert_eq!(Executor::normalize_reference("my.custom.name"), "my.custom.name");
+        
+        // 测试空字符串
+        assert_eq!(Executor::normalize_reference(""), "");
+    }
+    
+    #[test]
+    fn test_await_with_normalized_references() {
+        let mut executor = Executor::new();
+        
+        // 定义两个管道和一个动作
+        let ast = Ast {
+            statements: vec![
+                Statement::DataPipe {
+                    name: "pipe1".to_string(),
+                    operations: vec![],
+                },
+                Statement::DataPipe {
+                    name: "pipe2".to_string(),
+                    operations: vec![],
+                },
+                Statement::CommAction {
+                    name: Some("action1".to_string()),
+                    statements: vec![
+                        Statement::Print("Action 1 executed".to_string()),
+                    ],
+                },
+                // 使用 AWAIT 并发执行，带有完整引用
+                Statement::Await(vec![
+                    "DATA.PIPE.pipe1".to_string(),
+                    "DATA.PIPE.pipe2".to_string(),
+                    "COMM.ACTION.action1".to_string(),
+                ]),
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "AWAIT 应该能处理带前缀的引用");
+        
+        // 验证所有操作都被执行
+        let output = executor.output();
+        assert_eq!(output.len(), 3);
+        assert!(output[0].contains("执行管道: pipe1"));
+        assert!(output[1].contains("执行管道: pipe2"));
+        assert!(output[2].contains("Action 1 executed"));
+    }
+    
+    #[test]
+    fn test_integration_parser_executor_with_references() {
+        use crate::dsl::parser::Parser;
+        
+        // 测试完整的解析和执行流程
+        let dsl = r#"
+            DATA.PIPE.testpipe()
+            COMM.ACTION.testaction(
+                PRINT("Action executed")
+            )
+            DOING(DATA.PIPE.testpipe)
+            DOING(COMM.ACTION.testaction)
+        "#;
+        
+        let mut parser = Parser::new(dsl).expect("解析器创建失败");
+        let ast = parser.parse().expect("解析失败");
+        
+        let mut executor = Executor::new();
+        let result = executor.execute(&ast);
+        
+        assert!(result.is_ok(), "执行应该成功");
+        
+        // 验证输出
+        let output = executor.output();
+        assert_eq!(output.len(), 2);
+        assert!(output[0].contains("执行管道: testpipe"));
+        assert!(output[1].contains("Action executed"));
     }
 }
