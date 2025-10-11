@@ -299,6 +299,46 @@ impl Executor {
                 Ok(())
             }
             
+            Statement::DataVali { validator, key, value } => {
+                // 记录验证操作
+                self.output_buffer.push(format!("验证: {} 使用 {} 验证器", key, validator));
+                // 实际实现中应该根据 validator 名称调用相应的验证方法
+                Ok(())
+            }
+            
+            Statement::DataSeria { format, value } => {
+                // 记录序列化操作
+                let format_str = match format {
+                    SerializationFormat::Json => "JSON",
+                    SerializationFormat::Bin => "BIN",
+                };
+                self.output_buffer.push(format!("序列化: {} 使用 {} 格式", value, format_str));
+                Ok(())
+            }
+            
+            Statement::DataDeseria { format, data } => {
+                // 记录反序列化操作
+                let format_str = match format {
+                    SerializationFormat::Json => "JSON",
+                    SerializationFormat::Bin => "BIN",
+                };
+                self.output_buffer.push(format!("反序列化: {} 从 {} 格式", data, format_str));
+                Ok(())
+            }
+            
+            Statement::DataComp { level, data } => {
+                // 记录压缩操作
+                let level_str = level.map(|l| l.to_string()).unwrap_or_else(|| "default".to_string());
+                self.output_buffer.push(format!("压缩: {} 使用级别 {}", data, level_str));
+                Ok(())
+            }
+            
+            Statement::DataDecomp { data } => {
+                // 记录解压缩操作
+                self.output_buffer.push(format!("解压缩: {}", data));
+                Ok(())
+            }
+            
             Statement::Comment(_) => {
                 // 忽略注释
                 Ok(())

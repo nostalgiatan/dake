@@ -499,6 +499,90 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(Statement::DataRe { pattern })
             }
+            Token::Vali => {
+                // DATA.VALI.xxx(key, value)
+                self.advance();
+                self.expect(&Token::Dot)?;
+                let validator = self.parse_identifier()?;
+                self.expect(&Token::LParen)?;
+                let key = self.parse_identifier()?;
+                self.expect(&Token::Comma)?;
+                let value = self.parse_identifier()?;
+                self.expect(&Token::RParen)?;
+                Ok(Statement::DataVali { validator, key, value })
+            }
+            Token::Seria => {
+                // DATA.SERIA.JSON/BIN(value)
+                self.advance();
+                self.expect(&Token::Dot)?;
+                let format_token = self.current().clone();
+                let format = match format_token {
+                    Token::Json => {
+                        self.advance();
+                        SerializationFormat::Json
+                    }
+                    Token::Bin => {
+                        self.advance();
+                        SerializationFormat::Bin
+                    }
+                    _ => return Err(ParseError::new(1009, format!("无效的序列化格式: {}", format_token))),
+                };
+                self.expect(&Token::LParen)?;
+                let value = self.parse_identifier()?;
+                self.expect(&Token::RParen)?;
+                Ok(Statement::DataSeria { format, value })
+            }
+            Token::Deseria => {
+                // DATA.DESERIA.JSON/BIN(data)
+                self.advance();
+                self.expect(&Token::Dot)?;
+                let format_token = self.current().clone();
+                let format = match format_token {
+                    Token::Json => {
+                        self.advance();
+                        SerializationFormat::Json
+                    }
+                    Token::Bin => {
+                        self.advance();
+                        SerializationFormat::Bin
+                    }
+                    _ => return Err(ParseError::new(1009, format!("无效的反序列化格式: {}", format_token))),
+                };
+                self.expect(&Token::LParen)?;
+                let data = self.parse_identifier()?;
+                self.expect(&Token::RParen)?;
+                Ok(Statement::DataDeseria { format, data })
+            }
+            Token::Comp => {
+                // DATA.COMP(level, data) or DATA.COMP(data)
+                self.advance();
+                self.expect(&Token::LParen)?;
+                
+                // 尝试解析第一个参数
+                let first_arg = self.current().clone();
+                
+                // 检查是否有两个参数（level 和 data）
+                if let Token::Number(level) = first_arg {
+                    self.advance();
+                    self.expect(&Token::Comma)?;
+                    let data = self.parse_identifier()?;
+                    self.expect(&Token::RParen)?;
+                    Ok(Statement::DataComp { level: Some(level), data })
+                } else {
+                    // 只有一个参数（data），使用默认级别
+                    let data = self.parse_identifier()?;
+                    self.expect(&Token::RParen)?;
+                    Ok(Statement::DataComp { level: None, data })
+                }
+            }
+            Token::Decomp => {
+                // DATA.DECOMP(data)
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let data = self.parse_identifier()?;
+                self.expect(&Token::RParen)?;
+                Ok(Statement::DataDecomp { data })
+            }
             _ => Err(ParseError::new(1009, format!("无效的 DATA 类型: {}", data_type))),
         }
     }
@@ -1131,6 +1215,118 @@ ELSE:
                 assert_eq!(pattern, r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$");
             }
             _ => panic!("Expected DataRe statement"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_data_vali() {
+        let input = "DATA.VALI.not_null(username, value)";
+        let mut parser = Parser::new(input).expect("Failed to create parser");
+        let ast = parser.parse().expect("Failed to parse");
+        assert_eq!(ast.statements.len(), 1);
+        
+        match &ast.statements[0] {
+            Statement::DataVali { validator, key, value } => {
+                assert_eq!(validator, "not_null");
+                assert_eq!(key, "username");
+                assert_eq!(value, "value");
+            }
+            _ => panic!("Expected DataVali statement"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_data_seria_json() {
+        let input = "DATA.SERIA.JSON(mydata)";
+        let mut parser = Parser::new(input).expect("Failed to create parser");
+        let ast = parser.parse().expect("Failed to parse");
+        assert_eq!(ast.statements.len(), 1);
+        
+        match &ast.statements[0] {
+            Statement::DataSeria { format, value } => {
+                assert_eq!(*format, SerializationFormat::Json);
+                assert_eq!(value, "mydata");
+            }
+            _ => panic!("Expected DataSeria statement"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_data_seria_bin() {
+        let input = "DATA.SERIA.BIN(mydata)";
+        let mut parser = Parser::new(input).expect("Failed to create parser");
+        let ast = parser.parse().expect("Failed to parse");
+        assert_eq!(ast.statements.len(), 1);
+        
+        match &ast.statements[0] {
+            Statement::DataSeria { format, value } => {
+                assert_eq!(*format, SerializationFormat::Bin);
+                assert_eq!(value, "mydata");
+            }
+            _ => panic!("Expected DataSeria statement"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_data_deseria_json() {
+        let input = "DATA.DESERIA.JSON(rawdata)";
+        let mut parser = Parser::new(input).expect("Failed to create parser");
+        let ast = parser.parse().expect("Failed to parse");
+        assert_eq!(ast.statements.len(), 1);
+        
+        match &ast.statements[0] {
+            Statement::DataDeseria { format, data } => {
+                assert_eq!(*format, SerializationFormat::Json);
+                assert_eq!(data, "rawdata");
+            }
+            _ => panic!("Expected DataDeseria statement"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_data_comp_with_level() {
+        let input = "DATA.COMP(3, mydata)";
+        let mut parser = Parser::new(input).expect("Failed to create parser");
+        let ast = parser.parse().expect("Failed to parse");
+        assert_eq!(ast.statements.len(), 1);
+        
+        match &ast.statements[0] {
+            Statement::DataComp { level, data } => {
+                assert_eq!(*level, Some(3));
+                assert_eq!(data, "mydata");
+            }
+            _ => panic!("Expected DataComp statement"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_data_comp_without_level() {
+        let input = "DATA.COMP(mydata)";
+        let mut parser = Parser::new(input).expect("Failed to create parser");
+        let ast = parser.parse().expect("Failed to parse");
+        assert_eq!(ast.statements.len(), 1);
+        
+        match &ast.statements[0] {
+            Statement::DataComp { level, data } => {
+                assert_eq!(*level, None);
+                assert_eq!(data, "mydata");
+            }
+            _ => panic!("Expected DataComp statement"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_data_decomp() {
+        let input = "DATA.DECOMP(compressed)";
+        let mut parser = Parser::new(input).expect("Failed to create parser");
+        let ast = parser.parse().expect("Failed to parse");
+        assert_eq!(ast.statements.len(), 1);
+        
+        match &ast.statements[0] {
+            Statement::DataDecomp { data } => {
+                assert_eq!(data, "compressed");
+            }
+            _ => panic!("Expected DataDecomp statement"),
         }
     }
 }

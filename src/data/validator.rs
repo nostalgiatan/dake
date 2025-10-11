@@ -89,6 +89,28 @@ impl Validator {
         }
     }
 
+    /// 验证非 null (Option 类型)
+    ///
+    /// # 参数
+    /// * `field` - 字段名称
+    /// * `value` - 要验证的值
+    ///
+    /// # 返回
+    /// 如果值非 None 返回 Ok(())，否则返回验证错误
+    ///
+    /// # 错误码
+    /// * 4012 - 值为 null
+    pub fn validate_not_null<T>(&self, field: &str, value: &Option<T>) -> Result<()> {
+        if value.is_none() {
+            Err(ErrorInfo::new(
+                4012,
+                format!("字段 '{}' 不能为 null", field),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     /// 验证最小长度
     ///
     /// # 参数
@@ -461,6 +483,27 @@ mod tests {
         assert!(result.is_err());
         if let Err(err) = result {
             assert_eq!(err.code(), 4002);
+        }
+    }
+
+    #[test]
+    fn test_validate_not_null_success() {
+        let validator = Validator::new();
+        let value: Option<String> = Some("data".to_string());
+
+        let result = validator.validate_not_null("field", &value);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_not_null_failure() {
+        let validator = Validator::new();
+        let value: Option<String> = None;
+
+        let result = validator.validate_not_null("field", &value);
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err.code(), 4012);
         }
     }
 }

@@ -36,6 +36,13 @@ pub enum Token {
     All,
     Encry,
     Catch,
+    Vali,       // 新增：验证
+    Seria,      // 新增：序列化
+    Deseria,    // 新增：反序列化
+    Comp,       // 新增：压缩
+    Decomp,     // 新增：解压缩
+    Json,       // 新增：JSON
+    Bin,        // 新增：二进制
     
     // 字面量
     String(String),
@@ -418,6 +425,13 @@ impl Lexer {
             "ALL" => Token::All,
             "ENCRY" => Token::Encry,
             "CATCH" => Token::Catch,
+            "VALI" => Token::Vali,
+            "SERIA" => Token::Seria,
+            "DESERIA" => Token::Deseria,
+            "COMP" => Token::Comp,
+            "DECOMP" => Token::Decomp,
+            "JSON" => Token::Json,
+            "BIN" => Token::Bin,
             "true" => Token::Bool(true),
             "false" => Token::Bool(false),
             _ => Token::Ident(ident),
