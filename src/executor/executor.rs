@@ -8,7 +8,7 @@
 use crate::dsl::ast::*;
 use crate::executor::context::ExecutionContext;
 use crate::executor::crypto::CryptoOperations;
-use crate::data::RegexCache;
+use crate::data::{RegexCache, Validator, SerializableValue, Compressor, CompressionLevel};
 use error::{ErrorInfo, ErrorCategory, ErrorSeverity};
 use std::fmt;
 use std::collections::HashMap;
@@ -72,6 +72,12 @@ pub struct Executor {
     /// 正则表达式缓存
     regex_cache: RegexCache,
     
+    /// 数据验证器
+    validator: Validator,
+    
+    /// 数据压缩器
+    compressor: Compressor,
+    
     /// 输出缓冲区（用于测试）
     output_buffer: Vec<String>,
 }
@@ -120,6 +126,8 @@ impl Executor {
             errors: HashMap::new(),
             crypto: None,
             regex_cache: RegexCache::new(),
+            validator: Validator::new(),
+            compressor: Compressor::new(),
             output_buffer: Vec::new(),
         }
     }
@@ -284,8 +292,54 @@ impl Executor {
             }
             
             Statement::CommCmd { exec, args } => {
-                self.output_buffer.push(format!("执行命令: {} {:?}", exec, args));
-                Ok(())
+                // 实际执行子进程命令
+                use std::process::Command;
+                
+                let resolved_exec = self.context.interpolate(exec);
+                let resolved_args: Vec<String> = args.iter()
+                    .map(|arg| self.context.interpolate(arg))
+                    .collect();
+                
+                let result = Command::new(&resolved_exec)
+                    .args(&resolved_args)
+                    .output();
+                
+                match result {
+                    Ok(output) => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let status = output.status;
+                        
+                        // 存储命令输出到上下文
+                        let cmd_output_key = format!("_cmd_output_{}", exec);
+                        let cmd_status_key = format!("_cmd_status_{}", exec);
+                        self.context.set_local(cmd_output_key, Value::String(stdout.to_string()));
+                        self.context.set_local(cmd_status_key, Value::Number(status.code().unwrap_or(-1) as i64));
+                        
+                        if !status.success() {
+                            self.output_buffer.push(format!(
+                                "命令执行失败: {} {:?}, 状态码: {}, stderr: {}",
+                                resolved_exec, resolved_args, status.code().unwrap_or(-1), stderr
+                            ));
+                            return Err(ExecutionError::new(
+                                3001,
+                                format!("命令执行失败，状态码: {}", status.code().unwrap_or(-1))
+                            ));
+                        }
+                        
+                        self.output_buffer.push(format!(
+                            "命令执行成功: {} {:?}, 输出: {}",
+                            resolved_exec, resolved_args, stdout.trim()
+                        ));
+                        Ok(())
+                    }
+                    Err(e) => {
+                        Err(ExecutionError::new(
+                            3002,
+                            format!("无法执行命令 {}: {}", resolved_exec, e)
+                        ))
+                    }
+                }
             }
             
             Statement::Catch { error_name, statements } => {
@@ -299,44 +353,201 @@ impl Executor {
                 Ok(())
             }
             
-            Statement::DataVali { validator, key, value: _value } => {
-                // 记录验证操作
-                self.output_buffer.push(format!("验证: {} 使用 {} 验证器", key, validator));
-                // 实际实现中应该根据 validator 名称调用相应的验证方法
-                Ok(())
+            Statement::DataVali { validator, key, value } => {
+                // 实际执行数据验证
+                let resolved_value = self.context.interpolate(value);
+                
+                // 根据验证器类型执行相应的验证
+                let result = match validator.as_str() {
+                    "NOT_EMPTY" => self.validator.validate_not_empty(key, &resolved_value),
+                    "EMAIL" => self.validator.validate_email(key, &resolved_value),
+                    "URL" => self.validator.validate_url(key, &resolved_value),
+                    "NUMERIC" => self.validator.validate_numeric(key, &resolved_value),
+                    "ALPHA" => self.validator.validate_alpha(key, &resolved_value),
+                    "ALPHANUMERIC" => self.validator.validate_alphanumeric(key, &resolved_value),
+                    _ => {
+                        return Err(ExecutionError::new(
+                            4020,
+                            format!("未知的验证器: {}", validator)
+                        ));
+                    }
+                };
+                
+                match result {
+                    Ok(_) => {
+                        self.output_buffer.push(format!("验证成功: {} 使用 {} 验证器", key, validator));
+                        Ok(())
+                    }
+                    Err(e) => {
+                        Err(ExecutionError::new(
+                            e.code(),
+                            format!("验证失败: {}", e.message())
+                        ))
+                    }
+                }
             }
             
             Statement::DataSeria { format, value } => {
-                // 记录序列化操作
+                // 实际执行序列化操作
+                let resolved_value = self.context.interpolate(value);
+                
+                // 构造 SerializableValue
+                // 简单实现：尝试将字符串转换为适当的类型
+                let serializable = self.parse_to_serializable(&resolved_value)?;
+                
                 let format_str = match format {
                     SerializationFormat::Json => "JSON",
                     SerializationFormat::Bin => "BIN",
                 };
-                self.output_buffer.push(format!("序列化: {} 使用 {} 格式", value, format_str));
-                Ok(())
+                
+                let result = match format {
+                    SerializationFormat::Json => {
+                        serializable.to_json().map(|s| s.into_bytes())
+                    },
+                    SerializationFormat::Bin => serializable.to_binary(),
+                };
+                
+                match result {
+                    Ok(data) => {
+                        // 将序列化结果存储到上下文（以字节数转十六进制字符串形式）
+                        let hex_data = data.iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<String>();
+                        let serialized_key = format!("_serialized_{}", value);
+                        self.context.set_local(serialized_key, Value::String(hex_data));
+                        
+                        self.output_buffer.push(format!("序列化成功: {} 使用 {} 格式，大小: {} 字节", value, format_str, data.len()));
+                        Ok(())
+                    }
+                    Err(e) => {
+                        Err(ExecutionError::new(
+                            e.code(),
+                            format!("序列化失败: {}", e.message())
+                        ))
+                    }
+                }
             }
             
             Statement::DataDeseria { format, data } => {
-                // 记录反序列化操作
+                // 实际执行反序列化操作
+                let resolved_data = self.context.interpolate(data);
+                
+                // 从十六进制字符串转换回字节数组
+                let bytes = self.hex_to_bytes(&resolved_data)?;
+                
                 let format_str = match format {
                     SerializationFormat::Json => "JSON",
                     SerializationFormat::Bin => "BIN",
                 };
-                self.output_buffer.push(format!("反序列化: {} 从 {} 格式", data, format_str));
-                Ok(())
+                
+                let result = match format {
+                    SerializationFormat::Json => {
+                        // 字节转字符串
+                        String::from_utf8(bytes)
+                            .map_err(|e| ErrorInfo::new(5002, format!("无效的 UTF-8 数据: {}", e)))
+                            .and_then(|s| SerializableValue::from_json(&s))
+                    },
+                    SerializationFormat::Bin => SerializableValue::from_binary(&bytes),
+                };
+                
+                match result {
+                    Ok(value) => {
+                        // 将反序列化结果存储到上下文
+                        let deserialized_key = format!("_deserialized_{}", data);
+                        self.context.set_local(deserialized_key, Value::String(format!("{:?}", value)));
+                        
+                        self.output_buffer.push(format!("反序列化成功: {} 从 {} 格式", data, format_str));
+                        Ok(())
+                    }
+                    Err(e) => {
+                        Err(ExecutionError::new(
+                            e.code(),
+                            format!("反序列化失败: {}", e.message())
+                        ))
+                    }
+                }
             }
             
             Statement::DataComp { level, data } => {
-                // 记录压缩操作
-                let level_str = level.map(|l| l.to_string()).unwrap_or_else(|| "default".to_string());
-                self.output_buffer.push(format!("压缩: {} 使用级别 {}", data, level_str));
-                Ok(())
+                // 实际执行压缩操作
+                let resolved_data = self.context.interpolate(data);
+                let bytes = resolved_data.as_bytes();
+                
+                // 确定压缩级别
+                let compression_level = if let Some(l) = level {
+                    if *l == 1 {
+                        CompressionLevel::Fast
+                    } else if *l == 3 {
+                        CompressionLevel::Default
+                    } else if *l == 19 {
+                        CompressionLevel::Best
+                    } else {
+                        CompressionLevel::Custom(*l as i32)
+                    }
+                } else {
+                    CompressionLevel::Default
+                };
+                
+                let result = self.compressor.compress(bytes, compression_level);
+                
+                match result {
+                    Ok(compressed) => {
+                        // 将压缩结果存储到上下文（十六进制字符串）
+                        let hex_data = compressed.iter()
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<String>();
+                        let compressed_key = format!("_compressed_{}", data);
+                        self.context.set_local(compressed_key, Value::String(hex_data));
+                        
+                        let level_str = level.map(|l| l.to_string()).unwrap_or_else(|| "default".to_string());
+                        let ratio = Compressor::compression_ratio(bytes.len(), compressed.len());
+                        self.output_buffer.push(format!(
+                            "压缩成功: {} 使用级别 {}，原始: {} 字节，压缩后: {} 字节，压缩比: {:.2}%",
+                            data, level_str, bytes.len(), compressed.len(), ratio
+                        ));
+                        Ok(())
+                    }
+                    Err(e) => {
+                        Err(ExecutionError::new(
+                            e.code(),
+                            format!("压缩失败: {}", e.message())
+                        ))
+                    }
+                }
             }
             
             Statement::DataDecomp { data } => {
-                // 记录解压缩操作
-                self.output_buffer.push(format!("解压缩: {}", data));
-                Ok(())
+                // 实际执行解压缩操作
+                let resolved_data = self.context.interpolate(data);
+                
+                // 从十六进制字符串转换回字节数组
+                let bytes = self.hex_to_bytes(&resolved_data)?;
+                
+                let result = self.compressor.decompress(&bytes);
+                
+                match result {
+                    Ok(decompressed) => {
+                        // 尝试将解压缩结果转换为字符串
+                        let decompressed_str = String::from_utf8(decompressed.clone())
+                            .unwrap_or_else(|_| format!("[{} 字节的二进制数据]", decompressed.len()));
+                        
+                        // 将解压缩结果存储到上下文
+                        let decompressed_key = format!("_decompressed_{}", data);
+                        self.context.set_local(decompressed_key, Value::String(decompressed_str.clone()));
+                        
+                        self.output_buffer.push(format!(
+                            "解压缩成功: {}，解压后大小: {} 字节",
+                            data, decompressed.len()
+                        ));
+                        Ok(())
+                    }
+                    Err(e) => {
+                        Err(ExecutionError::new(
+                            e.code(),
+                            format!("解压缩失败: {}", e.message())
+                        ))
+                    }
+                }
             }
             
             Statement::Comment(_) => {
@@ -552,6 +763,75 @@ impl Executor {
         }
         
         Ok(result)
+    }
+    
+    /// 解析字符串为 SerializableValue
+    ///
+    /// # 参数
+    /// * `value` - 要解析的字符串
+    ///
+    /// # 返回
+    /// 成功时返回 SerializableValue
+    fn parse_to_serializable(&self, value: &str) -> Result<SerializableValue, ExecutionError> {
+        // 尝试解析为不同的类型
+        if value == "null" {
+            return Ok(SerializableValue::Null);
+        }
+        
+        if value == "true" {
+            return Ok(SerializableValue::Bool(true));
+        }
+        
+        if value == "false" {
+            return Ok(SerializableValue::Bool(false));
+        }
+        
+        // 尝试解析为整数
+        if let Ok(i) = value.parse::<i64>() {
+            return Ok(SerializableValue::Int(i));
+        }
+        
+        // 尝试解析为浮点数
+        if let Ok(f) = value.parse::<f64>() {
+            return Ok(SerializableValue::Float(f));
+        }
+        
+        // 默认作为字符串处理
+        Ok(SerializableValue::String(value.to_string()))
+    }
+    
+    /// 十六进制字符串转字节数组
+    ///
+    /// # 参数
+    /// * `hex` - 十六进制字符串
+    ///
+    /// # 返回
+    /// 成功时返回字节数组
+    fn hex_to_bytes(&self, hex: &str) -> Result<Vec<u8>, ExecutionError> {
+        // 移除可能的空格和换行符
+        let hex = hex.chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>();
+        
+        if hex.len() % 2 != 0 {
+            return Err(ExecutionError::new(
+                5003,
+                "十六进制字符串长度必须为偶数".to_string()
+            ));
+        }
+        
+        let mut bytes = Vec::with_capacity(hex.len() / 2);
+        for i in (0..hex.len()).step_by(2) {
+            let byte_str = &hex[i..i + 2];
+            let byte = u8::from_str_radix(byte_str, 16)
+                .map_err(|e| ExecutionError::new(
+                    5004,
+                    format!("无效的十六进制字符串: {}", e)
+                ))?;
+            bytes.push(byte);
+        }
+        
+        Ok(bytes)
     }
     
     /// 获取输出缓冲区（用于测试）

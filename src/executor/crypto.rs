@@ -163,20 +163,25 @@ impl CryptoOperations {
     
     /// 生成确定性 nonce
     ///
-    /// 使用数据的哈希生成固定的 nonce
+    /// 使用 BLAKE3 哈希函数基于密钥和数据生成固定的 nonce
+    ///
+    /// # 参数
+    /// - `data`: 要生成 nonce 的数据
+    ///
+    /// # 返回
+    /// 24 字节的 nonce
     fn generate_deterministic_nonce(&self, data: &[u8]) -> XNonce {
-        // 简单的哈希函数：对数据进行异或和模运算
-        let mut hash = [0u8; 24];
-        for (i, byte) in data.iter().enumerate() {
-            hash[i % 24] ^= byte;
-        }
+        // 使用 BLAKE3 keyed hash 生成确定性 nonce
+        // 这确保了相同的密钥和数据总是产生相同的 nonce
+        let mut hasher = blake3::Hasher::new_keyed(&self.key);
+        hasher.update(data);
+        let hash = hasher.finalize();
         
-        // 混合密钥以增加安全性
-        for (i, key_byte) in self.key.iter().enumerate() {
-            hash[i % 24] = hash[i % 24].wrapping_add(*key_byte);
-        }
+        // 取前 24 字节作为 nonce
+        let mut nonce_bytes = [0u8; 24];
+        nonce_bytes.copy_from_slice(&hash.as_bytes()[..24]);
         
-        XNonce::from(hash)
+        XNonce::from(nonce_bytes)
     }
     
     /// 获取密钥
