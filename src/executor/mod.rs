@@ -18,7 +18,4 @@ pub mod file_ops;
 pub mod crypto;
 
 // 重新导出核心类型
-pub use context::ExecutionContext;
-pub use executor::{Executor, ExecutionError};
-pub use file_ops::FileOperations;
-pub use crypto::CryptoOperations;
+pub use executor::Executor;

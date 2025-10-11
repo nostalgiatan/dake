@@ -12,12 +12,14 @@ use std::fmt;
 
 /// 文件操作错误
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct FileOpError {
     info: ErrorInfo,
 }
 
 impl FileOpError {
     /// 创建新的文件操作错误
+    #[allow(dead_code)]
     pub fn new(code: u32, message: String) -> Self {
         Self {
             info: ErrorInfo::new(code, message)
@@ -36,8 +38,10 @@ impl fmt::Display for FileOpError {
 impl std::error::Error for FileOpError {}
 
 /// 文件操作
+#[allow(dead_code)]
 pub struct FileOperations;
 
+#[allow(dead_code)]
 impl FileOperations {
     /// 验证路径安全性
     ///

@@ -27,6 +27,7 @@ impl ParseError {
     }
     
     /// 带上下文的解析错误
+    #[allow(dead_code)]
     pub fn with_context(code: u32, message: String, context: String) -> Self {
         Self {
             info: ErrorInfo::new(code, message)
@@ -490,6 +491,13 @@ impl Parser {
                 
                 self.expect(&Token::RParen)?;
                 Ok(Statement::DataPipe { name, operations })
+            }
+            Token::Re => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let pattern = self.parse_string()?;
+                self.expect(&Token::RParen)?;
+                Ok(Statement::DataRe { pattern })
             }
             _ => Err(ParseError::new(1009, format!("无效的 DATA 类型: {}", data_type))),
         }
@@ -1093,6 +1101,36 @@ ELSE:
             Err(e) => {
                 panic!("Failed to parse lib: {}", e);
             }
+        }
+    }
+    
+    #[test]
+    fn test_parse_data_re() {
+        let input = r#"DATA.RE("\\d+")"#;
+        let mut parser = Parser::new(input).expect("Failed to create parser");
+        let ast = parser.parse().expect("Failed to parse");
+        assert_eq!(ast.statements.len(), 1);
+        
+        match &ast.statements[0] {
+            Statement::DataRe { pattern } => {
+                assert_eq!(pattern, r"\d+");
+            }
+            _ => panic!("Expected DataRe statement"),
+        }
+    }
+    
+    #[test]
+    fn test_parse_data_re_complex() {
+        let input = r#"DATA.RE("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$")"#;
+        let mut parser = Parser::new(input).expect("Failed to create parser");
+        let ast = parser.parse().expect("Failed to parse");
+        assert_eq!(ast.statements.len(), 1);
+        
+        match &ast.statements[0] {
+            Statement::DataRe { pattern } => {
+                assert_eq!(pattern, r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$");
+            }
+            _ => panic!("Expected DataRe statement"),
         }
     }
 }

@@ -8,7 +8,7 @@
 use crate::dsl::ast::*;
 use crate::executor::context::ExecutionContext;
 use crate::executor::crypto::CryptoOperations;
-use crate::executor::file_ops::FileOperations;
+use crate::data::RegexCache;
 use error::{ErrorInfo, ErrorCategory, ErrorSeverity};
 use std::fmt;
 use std::collections::HashMap;
@@ -30,6 +30,7 @@ impl ExecutionError {
     }
     
     /// 带上下文的执行错误
+    #[allow(dead_code)]
     pub fn with_context(code: u32, message: String, context: String) -> Self {
         Self {
             info: ErrorInfo::new(code, message)
@@ -68,12 +69,16 @@ pub struct Executor {
     /// 加密操作
     crypto: Option<CryptoOperations>,
     
+    /// 正则表达式缓存
+    regex_cache: RegexCache,
+    
     /// 输出缓冲区（用于测试）
     output_buffer: Vec<String>,
 }
 
 /// 数据操作定义
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DataOpDef {
     name: String,
     file: String,
@@ -82,6 +87,7 @@ struct DataOpDef {
 
 /// 数据管道定义
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct DataPipeDef {
     name: String,
     operations: Vec<PipeOperation>,
@@ -89,6 +95,7 @@ struct DataPipeDef {
 
 /// 命令定义
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CommandDef {
     name: String,
     statements: Vec<Statement>,
@@ -96,6 +103,7 @@ struct CommandDef {
 
 /// 错误定义
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct ErrorDef {
     name: String,
     print: String,
@@ -111,6 +119,7 @@ impl Executor {
             commands: HashMap::new(),
             errors: HashMap::new(),
             crypto: None,
+            regex_cache: RegexCache::new(),
             output_buffer: Vec::new(),
         }
     }
@@ -188,6 +197,19 @@ impl Executor {
                         operations: operations.clone(),
                     },
                 );
+                Ok(())
+            }
+            
+            Statement::DataRe { pattern } => {
+                // 编译并缓存正则表达式
+                let regex = self.regex_cache.get_or_compile(pattern)
+                    .map_err(|e| ExecutionError::new(e.code(), e.message().to_string()))?;
+                
+                self.output_buffer.push(format!("编译正则表达式: {}", pattern));
+                
+                // 验证正则表达式可用
+                let _ = regex.is_match("");
+                
                 Ok(())
             }
             
@@ -403,6 +425,7 @@ impl Executor {
     }
     
     /// 获取输出缓冲区（用于测试）
+    #[allow(dead_code)]
     pub fn output(&self) -> &[String] {
         &self.output_buffer
     }
@@ -469,5 +492,80 @@ mod tests {
         executor.execute(&ast).expect("执行失败");
         
         assert!(executor.crypto.is_some());
+    }
+    
+    #[test]
+    fn test_data_re_basic() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![Statement::DataRe {
+                pattern: r"\d+".to_string(),
+            }],
+        };
+        
+        executor.execute(&ast).expect("执行失败");
+        
+        // 验证正则表达式已缓存
+        assert_eq!(executor.regex_cache.size().expect("获取大小失败"), 1);
+        assert!(executor.regex_cache.contains(r"\d+").expect("检查失败"));
+    }
+    
+    #[test]
+    fn test_data_re_multiple() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataRe {
+                    pattern: r"\d+".to_string(),
+                },
+                Statement::DataRe {
+                    pattern: r"[a-z]+".to_string(),
+                },
+                Statement::DataRe {
+                    pattern: r"\d+".to_string(),  // 重复的模式
+                },
+            ],
+        };
+        
+        executor.execute(&ast).expect("执行失败");
+        
+        // 验证只缓存了2个不同的正则表达式
+        assert_eq!(executor.regex_cache.size().expect("获取大小失败"), 2);
+    }
+    
+    #[test]
+    fn test_data_re_invalid() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![Statement::DataRe {
+                pattern: r"[".to_string(),  // 无效的正则表达式
+            }],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_data_re_complex_patterns() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataRe {
+                    pattern: r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$".to_string(),
+                },
+                Statement::DataRe {
+                    pattern: r"^https?://[^\s/$.?#].[^\s]*$".to_string(),
+                },
+            ],
+        };
+        
+        executor.execute(&ast).expect("执行失败");
+        
+        assert_eq!(executor.regex_cache.size().expect("获取大小失败"), 2);
     }
 }

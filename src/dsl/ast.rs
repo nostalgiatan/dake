@@ -44,6 +44,9 @@ pub enum Statement {
     /// 数据管道: DATA.PIPE.name(do_refs...)
     DataPipe { name: String, operations: Vec<PipeOperation> },
     
+    /// 正则表达式操作: DATA.RE(pattern)
+    DataRe { pattern: String },
+    
     /// 命令定义: COMM.name(action_name)
     Comm { name: String, action_name: String },
     

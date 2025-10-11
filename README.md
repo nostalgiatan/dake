@@ -7,12 +7,14 @@
 - ✅ **完整的 DSL 支持**: 类似 CMake 的 DSL 语法，专为数据处理设计
 - ✅ **变量管理**: 支持局部变量和环境变量，具有明确的优先级
 - ✅ **控制流**: IF/ELIF/ELSE 条件语句
+- ✅ **正则表达式缓存**: 高性能的正则表达式编译和缓存，避免重复编译
 - ✅ **文件加密**: 使用 XChaCha20-Poly1305 加密算法
 - ✅ **安全路径处理**: 禁止使用 ../, .../ 和 ./
 - ✅ **零隐式转换**: 所有操作都是显式的，确保最高性能
 - ✅ **内存安全**: 避免所有危险的 unwrap()，完整的错误处理
-- ✅ **测试驱动**: 31 个测试用例覆盖核心功能
+- ✅ **测试驱动**: 45 个测试用例覆盖核心功能
 - ✅ **中文文档**: 所有 API 都有详细的中文文档
+- ✅ **极致性能**: 使用细粒度锁和零成本抽象
 
 ## 安装
 
@@ -134,6 +136,10 @@ DATA.DO(clean_data, "data.csv", clean)
 # 定义数据管道
 DATA.PIPE.process(do.clean_data, do.transform, do.validate)
 
+# 正则表达式定义（自动缓存）
+DATA.RE("\\d+")
+DATA.RE("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$")
+
 # 执行数据管道
 DOING(DATA.PIPE.process)
 ```
@@ -202,6 +208,8 @@ set(VAR, "value")  # 行末注释也支持
 
 - `example.dsl`: 综合示例，展示各种 DSL 特性
 - `simple_lib.dsl`: 简单的数据包定义示例
+- `basic_regex.dsl`: 基础正则表达式使用示例
+- `regex_validation.dsl`: 正则表达式验证示例（邮箱、URL、电话号码等）
 
 运行示例：
 
@@ -222,12 +230,16 @@ dake/
 │   │   ├── ast.rs           # 抽象语法树定义
 │   │   ├── lexer.rs         # 词法分析器
 │   │   └── parser.rs        # 语法分析器
-│   └── executor/            # 执行器
+│   ├── executor/            # 执行器
+│   │   ├── mod.rs
+│   │   ├── context.rs       # 执行上下文
+│   │   ├── crypto.rs        # 加密操作
+│   │   ├── file_ops.rs      # 文件操作
+│   │   └── executor.rs      # 执行器核心
+│   └── data/                # 数据处理模块
 │       ├── mod.rs
-│       ├── context.rs       # 执行上下文
-│       ├── crypto.rs        # 加密操作
-│       ├── file_ops.rs      # 文件操作
-│       └── executor.rs      # 执行器核心
+│       ├── regex_cache.rs   # 正则表达式缓存
+│       └── README.md        # 数据模块文档
 ├── src/crates/              # 工具库
 │   ├── error/               # 错误处理框架
 │   ├── rstream/             # 异步流管理
@@ -235,7 +247,9 @@ dake/
 │   └── sys/                 # 系统信息监控
 ├── examples/                # 示例文件
 │   ├── example.dsl
-│   └── simple_lib.dsl
+│   ├── simple_lib.dsl
+│   ├── basic_regex.dsl
+│   └── regex_validation.dsl
 ├── Cargo.toml
 └── README.md
 ```
@@ -278,8 +292,8 @@ cargo doc --open
 - **命令行**: clap 4.5
 - **加密**: chacha20poly1305 0.10
 - **序列化**: serde 1.0
+- **正则表达式**: regex 1.12 (标准库)
 - **解析**: 自定义词法分析器和语法分析器
-- **异步**: tokio 1.47
 - **版本**: semver 1.0
 
 ## 设计原则
@@ -336,8 +350,10 @@ cargo doc --open
 - [x] 控制流执行
 - [x] 文件加密（XChaCha20-Poly1305）
 - [x] 文件操作
+- [x] 正则表达式缓存（DATA.RE）
 - [x] 命令行接口
-- [x] 测试套件
+- [x] 测试套件（45个测试）
+- [x] 零编译警告
 
 ### 进行中 🚧
 
@@ -390,5 +406,8 @@ cargo doc --open
 - ✅ 完整的 DSL 解析器
 - ✅ 基础执行器功能
 - ✅ 文件加密支持
+- ✅ 正则表达式缓存（DATA.RE）
 - ✅ 命令行工具
-- ✅ 31 个测试用例
+- ✅ 45 个测试用例
+- ✅ 零编译警告
+- ✅ 完整的中文文档

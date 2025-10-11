@@ -10,6 +10,7 @@ use std::path::PathBuf;
 mod dsl;
 mod executor;
 mod cli;
+mod data;
 
 /// dake - 数据处理和打包工具
 #[derive(Parser, Debug)]
