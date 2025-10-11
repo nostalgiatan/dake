@@ -299,7 +299,7 @@ impl Executor {
                 Ok(())
             }
             
-            Statement::DataVali { validator, key, value } => {
+            Statement::DataVali { validator, key, value: _value } => {
                 // 记录验证操作
                 self.output_buffer.push(format!("验证: {} 使用 {} 验证器", key, validator));
                 // 实际实现中应该根据 validator 名称调用相应的验证方法

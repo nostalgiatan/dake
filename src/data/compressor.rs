@@ -7,13 +7,13 @@
  */
 
 use error::{ErrorInfo, Result};
-use std::io::{Read, Write};
 
 /// 压缩级别
 ///
 /// 定义压缩的级别，从快速到最佳压缩比。
 /// zstd 支持级别 1-22，我们提供预设级别以简化使用。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum CompressionLevel {
     /// 快速压缩（级别 1）
     Fast,
@@ -27,6 +27,7 @@ pub enum CompressionLevel {
 
 impl CompressionLevel {
     /// 转换为 zstd 压缩级别
+    #[allow(dead_code)]
     pub fn to_level(self) -> i32 {
         match self {
             CompressionLevel::Fast => 1,
@@ -40,6 +41,7 @@ impl CompressionLevel {
     }
     
     /// 从数值创建压缩级别
+    #[allow(dead_code)]
     pub fn from_level(level: i32) -> Self {
         match level {
             1 => CompressionLevel::Fast,
@@ -73,10 +75,12 @@ impl CompressionLevel {
 ///
 /// assert_eq!(data, decompressed);
 /// ```
+#[allow(dead_code)]
 pub struct Compressor;
 
 impl Compressor {
     /// 创建新的压缩器
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self
     }
@@ -92,6 +96,7 @@ impl Compressor {
     ///
     /// # 错误码
     /// * 6001 - 压缩失败
+    #[allow(dead_code)]
     pub fn compress(&self, data: &[u8], level: CompressionLevel) -> Result<Vec<u8>> {
         zstd::encode_all(data, level.to_level())
             .map_err(|e| ErrorInfo::new(6001, format!("zstd 压缩失败: {}", e)))
@@ -107,6 +112,7 @@ impl Compressor {
     ///
     /// # 错误码
     /// * 6002 - 解压缩失败
+    #[allow(dead_code)]
     pub fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
         zstd::decode_all(data)
             .map_err(|e| ErrorInfo::new(6002, format!("zstd 解压缩失败: {}", e)))
@@ -120,6 +126,7 @@ impl Compressor {
     ///
     /// # 返回
     /// 压缩比（百分比）
+    #[allow(dead_code)]
     pub fn compression_ratio(original_size: usize, compressed_size: usize) -> f64 {
         if original_size == 0 {
             0.0

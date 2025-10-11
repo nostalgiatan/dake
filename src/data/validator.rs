@@ -12,6 +12,7 @@ use std::fmt;
 ///
 /// 包含验证失败的详细信息
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ValidationError {
     /// 字段名称
     field: String,
@@ -25,16 +26,19 @@ impl ValidationError {
     /// # 参数
     /// * `field` - 字段名称
     /// * `message` - 错误消息
+    #[allow(dead_code)]
     pub fn new(field: String, message: String) -> Self {
         Self { field, message }
     }
 
     /// 获取字段名称
+    #[allow(dead_code)]
     pub fn field(&self) -> &str {
         &self.field
     }
 
     /// 获取错误消息
+    #[allow(dead_code)]
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -62,8 +66,10 @@ impl fmt::Display for ValidationError {
 ///
 /// assert!(result.is_err());
 /// ```
+#[allow(dead_code)]
 pub struct Validator;
 
+#[allow(dead_code)]
 impl Validator {
     /// 创建新的验证器
     pub fn new() -> Self {
