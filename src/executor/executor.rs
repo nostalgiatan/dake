@@ -665,4 +665,159 @@ mod tests {
         
         assert_eq!(executor.regex_cache.size().expect("获取大小失败"), 2);
     }
+    
+    #[test]
+    fn test_comparison_operators_numbers() {
+        let mut executor = Executor::new();
+        
+        // 设置两个数字变量
+        executor.context.set_local("a".to_string(), Value::Number(10));
+        executor.context.set_local("b".to_string(), Value::Number(20));
+        executor.context.set_local("c".to_string(), Value::Number(10));
+        
+        let ast = Ast {
+            statements: vec![
+                // 测试相等
+                Statement::ControlFlow(ControlFlow {
+                    if_branch: (
+                        Expression::Binary {
+                            op: BinaryOp::Eq,
+                            left: Box::new(Expression::Variable("a".to_string())),
+                            right: Box::new(Expression::Variable("c".to_string())),
+                        },
+                        vec![Statement::Print("a == c".to_string())],
+                    ),
+                    elif_branches: vec![],
+                    else_branch: None,
+                }),
+                // 测试不等
+                Statement::ControlFlow(ControlFlow {
+                    if_branch: (
+                        Expression::Binary {
+                            op: BinaryOp::Ne,
+                            left: Box::new(Expression::Variable("a".to_string())),
+                            right: Box::new(Expression::Variable("b".to_string())),
+                        },
+                        vec![Statement::Print("a != b".to_string())],
+                    ),
+                    elif_branches: vec![],
+                    else_branch: None,
+                }),
+                // 测试小于
+                Statement::ControlFlow(ControlFlow {
+                    if_branch: (
+                        Expression::Binary {
+                            op: BinaryOp::Lt,
+                            left: Box::new(Expression::Variable("a".to_string())),
+                            right: Box::new(Expression::Variable("b".to_string())),
+                        },
+                        vec![Statement::Print("a < b".to_string())],
+                    ),
+                    elif_branches: vec![],
+                    else_branch: None,
+                }),
+                // 测试大于等于
+                Statement::ControlFlow(ControlFlow {
+                    if_branch: (
+                        Expression::Binary {
+                            op: BinaryOp::Ge,
+                            left: Box::new(Expression::Variable("b".to_string())),
+                            right: Box::new(Expression::Variable("a".to_string())),
+                        },
+                        vec![Statement::Print("b >= a".to_string())],
+                    ),
+                    elif_branches: vec![],
+                    else_branch: None,
+                }),
+            ],
+        };
+        
+        executor.execute(&ast).expect("执行失败");
+        
+        // 验证所有条件都执行了
+        let output = executor.output();
+        assert_eq!(output.len(), 4);
+        assert!(output[0].contains("a == c"));
+        assert!(output[1].contains("a != b"));
+        assert!(output[2].contains("a < b"));
+        assert!(output[3].contains("b >= a"));
+    }
+    
+    #[test]
+    fn test_comparison_operators_strings() {
+        let mut executor = Executor::new();
+        
+        // 设置字符串变量
+        executor.context.set_local("str1".to_string(), Value::String("apple".to_string()));
+        executor.context.set_local("str2".to_string(), Value::String("banana".to_string()));
+        executor.context.set_local("str3".to_string(), Value::String("apple".to_string()));
+        
+        let ast = Ast {
+            statements: vec![
+                // 测试字符串相等
+                Statement::ControlFlow(ControlFlow {
+                    if_branch: (
+                        Expression::Binary {
+                            op: BinaryOp::Eq,
+                            left: Box::new(Expression::Variable("str1".to_string())),
+                            right: Box::new(Expression::Variable("str3".to_string())),
+                        },
+                        vec![Statement::Print("str1 == str3".to_string())],
+                    ),
+                    elif_branches: vec![],
+                    else_branch: None,
+                }),
+                // 测试字符串字典序比较
+                Statement::ControlFlow(ControlFlow {
+                    if_branch: (
+                        Expression::Binary {
+                            op: BinaryOp::Lt,
+                            left: Box::new(Expression::Variable("str1".to_string())),
+                            right: Box::new(Expression::Variable("str2".to_string())),
+                        },
+                        vec![Statement::Print("str1 < str2".to_string())],
+                    ),
+                    elif_branches: vec![],
+                    else_branch: None,
+                }),
+            ],
+        };
+        
+        executor.execute(&ast).expect("执行失败");
+        
+        let output = executor.output();
+        assert_eq!(output.len(), 2);
+        assert!(output[0].contains("str1 == str3"));
+        assert!(output[1].contains("str1 < str2"));
+    }
+    
+    #[test]
+    fn test_comparison_operators_mixed_types_error() {
+        let mut executor = Executor::new();
+        
+        // 设置不同类型的变量
+        executor.context.set_local("num".to_string(), Value::Number(10));
+        executor.context.set_local("str".to_string(), Value::String("10".to_string()));
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::ControlFlow(ControlFlow {
+                    if_branch: (
+                        Expression::Binary {
+                            op: BinaryOp::Eq,
+                            left: Box::new(Expression::Variable("num".to_string())),
+                            right: Box::new(Expression::Variable("str".to_string())),
+                        },
+                        vec![Statement::Print("should not execute".to_string())],
+                    ),
+                    elif_branches: vec![],
+                    else_branch: None,
+                }),
+            ],
+        };
+        
+        // 应该返回错误，因为不能比较不同类型
+        let result = executor.execute(&ast);
+        assert!(result.is_err());
+    }
 }
