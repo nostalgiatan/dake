@@ -220,6 +220,8 @@ impl Parser {
     }
     
     /// 检查是否是控制流块的终止符
+    /// 只包含会开始新的顶层定义的结构性关键字
+    /// PRINT, DATA等操作关键字可以出现在块内，所以不包含在内
     fn is_block_terminator(&self) -> bool {
         matches!(
             self.current(),
@@ -1327,6 +1329,63 @@ ELSE:
                 assert_eq!(data, "compressed");
             }
             _ => panic!("Expected DataDecomp statement"),
+        }
+    }
+    
+    #[test]
+    fn test_if_block_terminator() {
+        // 测试 IF 块后紧跟 SET 等结构性关键字，确保正确终止块
+        let input = r#"
+IF true:
+    PRINT("inside if")
+set(VAR, "value")
+"#;
+        let mut parser = Parser::new(input).expect("Failed to create parser");
+        let ast = parser.parse().expect("Failed to parse");
+        
+        // 应该有两个顶层语句：IF 和 SET
+        assert_eq!(ast.statements.len(), 2);
+        
+        // 第一个语句是 IF
+        match &ast.statements[0] {
+            Statement::ControlFlow(cf) => {
+                // IF 块内只有一个 PRINT
+                assert_eq!(cf.if_branch.1.len(), 1);
+                assert!(matches!(cf.if_branch.1[0], Statement::Print(_)));
+            }
+            _ => panic!("Expected ControlFlow statement"),
+        }
+        
+        // 第二个语句是顶层 SET
+        assert!(matches!(ast.statements[1], Statement::Set { .. }));
+    }
+    
+    #[test]
+    fn test_if_block_with_multiple_statements() {
+        // 测试 IF 块内有多个语句的情况（带 ELSE）
+        let input = r#"
+IF true:
+    PRINT("first")
+    PRINT("second")
+    PRINT("third")
+ELSE:
+    PRINT("else branch")
+"#;
+        let mut parser = Parser::new(input).expect("Failed to create parser");
+        let ast = parser.parse().expect("Failed to parse");
+        
+        // 应该有一个顶层语句（IF-ELSE）
+        assert_eq!(ast.statements.len(), 1);
+        
+        // 语句是 ControlFlow
+        match &ast.statements[0] {
+            Statement::ControlFlow(cf) => {
+                // IF 块包含三个语句
+                assert_eq!(cf.if_branch.1.len(), 3);
+                // ELSE 块包含一个语句
+                assert_eq!(cf.else_branch.as_ref().unwrap().len(), 1);
+            }
+            _ => panic!("Expected ControlFlow statement"),
         }
     }
 }
