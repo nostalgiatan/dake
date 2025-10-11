@@ -1295,4 +1295,316 @@ mod tests {
         assert!(output[0].contains("执行管道: testpipe"));
         assert!(output[1].contains("Action executed"));
     }
+    
+    #[test]
+    fn test_data_vali_not_empty_success() {
+        let mut executor = Executor::new();
+        executor.context.set_local("name".to_string(), Value::String("Alice".to_string()));
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataVali {
+                    validator: "NOT_EMPTY".to_string(),
+                    key: "name".to_string(),
+                    value: "${name}".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "验证应该成功");
+        assert_eq!(executor.output().len(), 1);
+        assert!(executor.output()[0].contains("验证成功"));
+        assert!(executor.output()[0].contains("NOT_EMPTY"));
+    }
+    
+    #[test]
+    fn test_data_vali_not_empty_failure() {
+        let mut executor = Executor::new();
+        executor.context.set_local("empty".to_string(), Value::String("".to_string()));
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataVali {
+                    validator: "NOT_EMPTY".to_string(),
+                    key: "empty".to_string(),
+                    value: "${empty}".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_err(), "验证应该失败");
+    }
+    
+    #[test]
+    fn test_data_vali_email_success() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataVali {
+                    validator: "EMAIL".to_string(),
+                    key: "email".to_string(),
+                    value: "test@example.com".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "邮箱验证应该成功");
+        assert!(executor.output()[0].contains("验证成功"));
+    }
+    
+    #[test]
+    fn test_data_vali_email_failure() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataVali {
+                    validator: "EMAIL".to_string(),
+                    key: "email".to_string(),
+                    value: "invalid-email".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_err(), "邮箱验证应该失败");
+    }
+    
+    #[test]
+    fn test_data_seria_json() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataSeria {
+                    format: SerializationFormat::Json,
+                    value: "42".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "序列化应该成功");
+        assert_eq!(executor.output().len(), 1);
+        assert!(executor.output()[0].contains("序列化成功"));
+        assert!(executor.output()[0].contains("JSON"));
+        
+        // 验证数据被存储到上下文
+        let serialized = executor.context.get("_serialized_42");
+        assert!(serialized.is_some(), "序列化数据应该被存储");
+    }
+    
+    #[test]
+    fn test_data_seria_bin() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataSeria {
+                    format: SerializationFormat::Bin,
+                    value: "Hello".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "二进制序列化应该成功");
+        assert!(executor.output()[0].contains("BIN"));
+    }
+    
+    #[test]
+    fn test_data_comp_decomp_roundtrip() {
+        let mut executor = Executor::new();
+        executor.context.set_local("data".to_string(), Value::String("Hello, World! This is a test string for compression.".to_string()));
+        
+        let ast = Ast {
+            statements: vec![
+                // 压缩数据
+                Statement::DataComp {
+                    level: Some(3),
+                    data: "${data}".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "压缩应该成功");
+        assert_eq!(executor.output().len(), 1);
+        assert!(executor.output()[0].contains("压缩成功"));
+        assert!(executor.output()[0].contains("级别 3"));
+        
+        // 获取压缩数据
+        let compressed = executor.context.get("_compressed_${data}").expect("压缩数据应该被存储");
+        
+        // 解压缩数据
+        let mut executor2 = Executor::new();
+        executor2.context.set_local("compressed".to_string(), compressed);
+        
+        let ast2 = Ast {
+            statements: vec![
+                Statement::DataDecomp {
+                    data: "${compressed}".to_string(),
+                },
+            ],
+        };
+        
+        let result2 = executor2.execute(&ast2);
+        assert!(result2.is_ok(), "解压缩应该成功");
+        assert!(executor2.output()[0].contains("解压缩成功"));
+    }
+    
+    #[test]
+    fn test_data_comp_custom_level() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataComp {
+                    level: Some(19),  // Best compression
+                    data: "test data".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "自定义级别压缩应该成功");
+        assert!(executor.output()[0].contains("级别 19"));
+    }
+    
+    #[test]
+    fn test_data_comp_default_level() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataComp {
+                    level: None,  // Default level
+                    data: "test data".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "默认级别压缩应该成功");
+        assert!(executor.output()[0].contains("级别 default"));
+    }
+    
+    #[test]
+    fn test_comm_cmd_success() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::CommCmd {
+                    exec: "echo".to_string(),
+                    args: vec!["Hello".to_string(), "World".to_string()],
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "命令执行应该成功");
+        assert_eq!(executor.output().len(), 1);
+        assert!(executor.output()[0].contains("命令执行成功"));
+        assert!(executor.output()[0].contains("echo"));
+        
+        // 验证输出被存储到上下文
+        let cmd_output = executor.context.get("_cmd_output_echo");
+        assert!(cmd_output.is_some(), "命令输出应该被存储");
+        
+        let cmd_status = executor.context.get("_cmd_status_echo");
+        assert!(cmd_status.is_some(), "命令状态应该被存储");
+        if let Some(Value::Number(status)) = cmd_status {
+            assert_eq!(status, 0, "命令状态应该为 0");
+        }
+    }
+    
+    #[test]
+    fn test_comm_cmd_with_interpolation() {
+        let mut executor = Executor::new();
+        executor.context.set_local("message".to_string(), Value::String("test".to_string()));
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::CommCmd {
+                    exec: "echo".to_string(),
+                    args: vec!["${message}".to_string()],
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "带变量插值的命令执行应该成功");
+        
+        let cmd_output = executor.context.get("_cmd_output_echo");
+        if let Some(Value::String(output)) = cmd_output {
+            assert!(output.contains("test"), "输出应该包含插值后的值");
+        }
+    }
+    
+    #[test]
+    fn test_parse_to_serializable() {
+        let executor = Executor::new();
+        
+        // 测试 null
+        let result = executor.parse_to_serializable("null");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), SerializableValue::Null);
+        
+        // 测试布尔值
+        let result = executor.parse_to_serializable("true");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), SerializableValue::Bool(true));
+        
+        let result = executor.parse_to_serializable("false");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), SerializableValue::Bool(false));
+        
+        // 测试整数
+        let result = executor.parse_to_serializable("42");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), SerializableValue::Int(42));
+        
+        // 测试浮点数
+        let result = executor.parse_to_serializable("3.14");
+        assert!(result.is_ok());
+        if let SerializableValue::Float(f) = result.unwrap() {
+            assert!((f - 3.14).abs() < 0.0001);
+        } else {
+            panic!("应该解析为浮点数");
+        }
+        
+        // 测试字符串
+        let result = executor.parse_to_serializable("Hello World");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), SerializableValue::String("Hello World".to_string()));
+    }
+    
+    #[test]
+    fn test_hex_to_bytes() {
+        let executor = Executor::new();
+        
+        // 测试简单的十六进制字符串
+        let result = executor.hex_to_bytes("48656c6c6f");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"Hello");
+        
+        // 测试带空格的十六进制字符串
+        let result = executor.hex_to_bytes("48 65 6c 6c 6f");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), b"Hello");
+        
+        // 测试无效的十六进制字符串（奇数长度）
+        let result = executor.hex_to_bytes("48656c6c6");
+        assert!(result.is_err());
+        
+        // 测试无效的十六进制字符
+        let result = executor.hex_to_bytes("xyz");
+        assert!(result.is_err());
+    }
 }
+
