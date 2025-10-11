@@ -47,6 +47,21 @@ pub enum Statement {
     /// 正则表达式操作: DATA.RE(pattern)
     DataRe { pattern: String },
     
+    /// 数据验证: DATA.VALI.xxx(key, value)
+    DataVali { validator: String, key: String, value: String },
+    
+    /// 数据序列化: DATA.SERIA.JSON/BIN(value)
+    DataSeria { format: SerializationFormat, value: String },
+    
+    /// 数据反序列化: DATA.DESERIA.JSON/BIN(data)
+    DataDeseria { format: SerializationFormat, data: String },
+    
+    /// 数据压缩: DATA.COMP(level, data)
+    DataComp { level: Option<i64>, data: String },
+    
+    /// 数据解压缩: DATA.DECOMP(data)
+    DataDecomp { data: String },
+    
     /// 命令定义: COMM.name(action_name)
     Comm { name: String, action_name: String },
     
@@ -85,6 +100,15 @@ pub enum Statement {
     
     /// 注释 (通常在解析时忽略，但可以保留用于文档生成)
     Comment(String),
+}
+
+/// 序列化格式
+#[derive(Debug, Clone, PartialEq)]
+pub enum SerializationFormat {
+    /// JSON 格式
+    Json,
+    /// 二进制格式
+    Bin,
 }
 
 /// 控制流结构

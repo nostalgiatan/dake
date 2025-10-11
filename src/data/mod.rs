@@ -13,7 +13,13 @@ pub mod serializer;
 pub mod compressor;
 
 pub use regex_cache::RegexCache;
+
+// 允许未使用的导入 - 这些是公开的 API，供外部使用
+#[allow(unused_imports)]
 pub use pipeline::{Pipeline, TryPipeline};
+#[allow(unused_imports)]
 pub use validator::{Validator, ValidationError};
+#[allow(unused_imports)]
 pub use serializer::SerializableValue;
+#[allow(unused_imports)]
 pub use compressor::{Compressor, CompressionLevel};

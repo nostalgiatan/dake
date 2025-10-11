@@ -12,6 +12,7 @@ use std::fmt;
 ///
 /// 包含验证失败的详细信息
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ValidationError {
     /// 字段名称
     field: String,
@@ -25,16 +26,19 @@ impl ValidationError {
     /// # 参数
     /// * `field` - 字段名称
     /// * `message` - 错误消息
+    #[allow(dead_code)]
     pub fn new(field: String, message: String) -> Self {
         Self { field, message }
     }
 
     /// 获取字段名称
+    #[allow(dead_code)]
     pub fn field(&self) -> &str {
         &self.field
     }
 
     /// 获取错误消息
+    #[allow(dead_code)]
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -62,8 +66,10 @@ impl fmt::Display for ValidationError {
 ///
 /// assert!(result.is_err());
 /// ```
+#[allow(dead_code)]
 pub struct Validator;
 
+#[allow(dead_code)]
 impl Validator {
     /// 创建新的验证器
     pub fn new() -> Self {
@@ -83,6 +89,28 @@ impl Validator {
             Err(ErrorInfo::new(
                 4001,
                 format!("字段 '{}' 不能为空", field),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// 验证非 null (Option 类型)
+    ///
+    /// # 参数
+    /// * `field` - 字段名称
+    /// * `value` - 要验证的值
+    ///
+    /// # 返回
+    /// 如果值非 None 返回 Ok(())，否则返回验证错误
+    ///
+    /// # 错误码
+    /// * 4012 - 值为 null
+    pub fn validate_not_null<T>(&self, field: &str, value: &Option<T>) -> Result<()> {
+        if value.is_none() {
+            Err(ErrorInfo::new(
+                4012,
+                format!("字段 '{}' 不能为 null", field),
             ))
         } else {
             Ok(())
@@ -461,6 +489,27 @@ mod tests {
         assert!(result.is_err());
         if let Err(err) = result {
             assert_eq!(err.code(), 4002);
+        }
+    }
+
+    #[test]
+    fn test_validate_not_null_success() {
+        let validator = Validator::new();
+        let value: Option<String> = Some("data".to_string());
+
+        let result = validator.validate_not_null("field", &value);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_not_null_failure() {
+        let validator = Validator::new();
+        let value: Option<String> = None;
+
+        let result = validator.validate_not_null("field", &value);
+        assert!(result.is_err());
+        if let Err(err) = result {
+            assert_eq!(err.code(), 4012);
         }
     }
 }

@@ -12,6 +12,7 @@ use std::collections::HashMap;
 ///
 /// 支持常用的数据类型，可以转换为 JSON 或二进制格式。
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum SerializableValue {
     /// 空值
     Null,
@@ -29,6 +30,7 @@ pub enum SerializableValue {
     Object(HashMap<String, SerializableValue>),
 }
 
+#[allow(dead_code)]
 impl SerializableValue {
     /// 序列化为 JSON 字符串
     ///
@@ -286,11 +288,13 @@ impl SerializableValue {
 }
 
 /// JSON 解析器
+#[allow(dead_code)]
 struct JsonParser {
     chars: Vec<char>,
     pos: usize,
 }
 
+#[allow(dead_code)]
 impl JsonParser {
     fn new(json: &str) -> Self {
         Self {

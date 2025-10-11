@@ -25,11 +25,13 @@ use error::Result;
 ///
 /// assert_eq!(result, vec![6, 8, 10]);
 /// ```
+#[allow(dead_code)]
 pub struct Pipeline<T> {
     /// 内部迭代器
     items: Vec<T>,
 }
 
+#[allow(dead_code)]
 impl<T> Pipeline<T> {
     /// 创建新的空管道
     ///
@@ -170,11 +172,13 @@ impl<T> Default for Pipeline<T> {
 /// 可尝试的管道操作
 ///
 /// 支持可能失败的操作，例如 try_map。
+#[allow(dead_code)]
 pub struct TryPipeline<T> {
     /// 内部迭代器
     items: Vec<T>,
 }
 
+#[allow(dead_code)]
 impl<T> TryPipeline<T> {
     /// 从管道创建
     ///
