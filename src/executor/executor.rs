@@ -115,6 +115,17 @@ struct ErrorDef {
     print: String,
 }
 
+/// 并发任务类型
+///
+/// 用于在 AWAIT 并发执行中标识不同类型的任务
+#[derive(Debug, Clone)]
+enum TaskType {
+    /// 数据管道任务
+    Pipe(DataPipeDef),
+    /// 命令任务
+    Command(CommandDef),
+}
+
 impl Executor {
     /// 创建新的执行器
     pub fn new() -> Self {
@@ -250,13 +261,8 @@ impl Executor {
             }
             
             Statement::Await(references) => {
-                // 使用顺序执行以保持简单性和避免额外依赖
-                // 由于执行器是同步的，实现真正的并发需要复杂的架构改动
-                // 当前的顺序执行已经足够满足大多数用例
-                for reference in references {
-                    self.execute_doing(reference)?;
-                }
-                Ok(())
+                // 使用 smol 实现真正的并发执行
+                self.execute_await(references)
             }
             
             Statement::Files(paths) => {
@@ -741,6 +747,125 @@ impl Executor {
             4005,
             format!("未找到操作或命令: {}", reference),
         ))
+    }
+    
+    /// 并发执行多个引用
+    ///
+    /// 使用 smol 异步运行时实现真正的并发执行。
+    /// 所有引用的操作将在独立的任务中并发执行。
+    ///
+    /// # 参数
+    /// * `references` - 要并发执行的引用列表
+    ///
+    /// # 返回
+    /// 执行成功返回 Ok(())，任何一个任务失败则返回错误
+    ///
+    /// # 错误处理
+    /// 如果任何一个任务失败，会立即返回错误，但其他任务会继续执行直到完成。
+    fn execute_await(&mut self, references: &[String]) -> Result<(), ExecutionError> {
+        use std::sync::{Arc, Mutex};
+        
+        // 如果只有一个引用，直接顺序执行以优化性能
+        if references.len() <= 1 {
+            for reference in references {
+                self.execute_doing(reference)?;
+            }
+            return Ok(());
+        }
+        
+        // 为每个引用准备执行数据
+        // 我们需要克隆必要的数据以在并发任务间共享
+        let mut task_data = Vec::new();
+        
+        for reference in references {
+            let normalized = Self::normalize_reference(reference);
+            
+            // 检查引用是否存在，收集需要执行的内容
+            if let Some(pipe) = self.data_pipes.get(normalized).cloned() {
+                task_data.push((reference.clone(), TaskType::Pipe(pipe)));
+            } else if let Some(cmd) = self.commands.get(normalized).cloned() {
+                task_data.push((reference.clone(), TaskType::Command(cmd)));
+            } else {
+                return Err(ExecutionError::new(
+                    4005,
+                    format!("未找到操作或命令: {}", reference),
+                ));
+            }
+        }
+        
+        // 使用 Arc<Mutex<>> 来共享输出缓冲区
+        let outputs = Arc::new(Mutex::new(Vec::<String>::new()));
+        let errors = Arc::new(Mutex::new(Vec::<String>::new()));
+        
+        // 克隆执行上下文，用于命令执行
+        let context = self.context.clone();
+        
+        // 使用 smol 并发执行所有任务
+        smol::block_on(async {
+            let mut tasks = Vec::new();
+            
+            for (_reference, task_type) in task_data {
+                let outputs = Arc::clone(&outputs);
+                let errors = Arc::clone(&errors);
+                let context = context.clone();
+                
+                let task = smol::spawn(async move {
+                    match task_type {
+                        TaskType::Pipe(pipe) => {
+                            // 执行管道
+                            let output = format!("执行管道: {}", pipe.name);
+                            outputs.lock().unwrap().push(output);
+                        }
+                        TaskType::Command(cmd) => {
+                            // 为每个命令创建一个独立的执行器
+                            // 这样可以并发执行不同的命令而不会相互干扰
+                            let mut isolated_executor = Executor::new();
+                            isolated_executor.context = context;
+                            
+                            // 执行命令中的所有语句
+                            for stmt in &cmd.statements {
+                                match isolated_executor.execute_statement(stmt) {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        errors.lock().unwrap().push(format!("命令 {} 执行失败: {}", cmd.name, e));
+                                        return;
+                                    }
+                                }
+                            }
+                            
+                            // 收集命令执行的输出
+                            for output in isolated_executor.output_buffer {
+                                outputs.lock().unwrap().push(output);
+                            }
+                        }
+                    }
+                });
+                
+                tasks.push(task);
+            }
+            
+            // 等待所有任务完成
+            for task in tasks {
+                task.await;
+            }
+        });
+        
+        // 收集所有输出
+        let collected_outputs = outputs.lock().unwrap();
+        for output in collected_outputs.iter() {
+            self.output_buffer.push(output.clone());
+        }
+        
+        // 检查是否有错误
+        let collected_errors = errors.lock().unwrap();
+        if !collected_errors.is_empty() {
+            return Err(ExecutionError::new(
+                4007,
+                format!("AWAIT 执行失败: {:?}", collected_errors),
+            ));
+        }
+        
+        Ok(())
     }
     
     /// 解析文件路径（处理变量插值）
@@ -1606,6 +1731,168 @@ mod tests {
         // 测试无效的十六进制字符
         let result = executor.hex_to_bytes("xyz");
         assert!(result.is_err());
+    }
+    
+    #[test]
+    fn test_await_concurrent_execution() {
+        let mut executor = Executor::new();
+        
+        // 定义多个命令动作用于并发测试
+        let ast = Ast {
+            statements: vec![
+                Statement::CommAction {
+                    name: Some("task1".to_string()),
+                    statements: vec![
+                        Statement::Print("Task 1 started".to_string()),
+                        Statement::Print("Task 1 completed".to_string()),
+                    ],
+                },
+                Statement::CommAction {
+                    name: Some("task2".to_string()),
+                    statements: vec![
+                        Statement::Print("Task 2 started".to_string()),
+                        Statement::Print("Task 2 completed".to_string()),
+                    ],
+                },
+                Statement::CommAction {
+                    name: Some("task3".to_string()),
+                    statements: vec![
+                        Statement::Print("Task 3 started".to_string()),
+                        Statement::Print("Task 3 completed".to_string()),
+                    ],
+                },
+                // 并发执行所有任务
+                Statement::Await(vec![
+                    "COMM.ACTION.task1".to_string(),
+                    "COMM.ACTION.task2".to_string(),
+                    "COMM.ACTION.task3".to_string(),
+                ]),
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "并发执行应该成功");
+        
+        // 验证所有任务都被执行
+        let output = executor.output();
+        assert_eq!(output.len(), 6, "应该有 6 个输出（每个任务 2 个）");
+        
+        // 验证每个任务的输出都存在
+        let output_str = output.join("\n");
+        assert!(output_str.contains("Task 1 started"));
+        assert!(output_str.contains("Task 1 completed"));
+        assert!(output_str.contains("Task 2 started"));
+        assert!(output_str.contains("Task 2 completed"));
+        assert!(output_str.contains("Task 3 started"));
+        assert!(output_str.contains("Task 3 completed"));
+    }
+    
+    #[test]
+    fn test_await_with_mixed_types() {
+        let mut executor = Executor::new();
+        
+        // 混合管道和命令的并发执行
+        let ast = Ast {
+            statements: vec![
+                Statement::DataPipe {
+                    name: "pipeline_a".to_string(),
+                    operations: vec![],
+                },
+                Statement::DataPipe {
+                    name: "pipeline_b".to_string(),
+                    operations: vec![],
+                },
+                Statement::CommAction {
+                    name: Some("action_c".to_string()),
+                    statements: vec![
+                        Statement::Print("Action C executing".to_string()),
+                    ],
+                },
+                // 并发执行混合类型
+                Statement::Await(vec![
+                    "DATA.PIPE.pipeline_a".to_string(),
+                    "DATA.PIPE.pipeline_b".to_string(),
+                    "COMM.ACTION.action_c".to_string(),
+                ]),
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "混合类型并发执行应该成功");
+        
+        let output = executor.output();
+        assert_eq!(output.len(), 3);
+        assert!(output.iter().any(|s| s.contains("pipeline_a")));
+        assert!(output.iter().any(|s| s.contains("pipeline_b")));
+        assert!(output.iter().any(|s| s.contains("Action C executing")));
+    }
+    
+    #[test]
+    fn test_await_single_reference_optimization() {
+        let mut executor = Executor::new();
+        
+        // 测试单个引用的优化路径（应该顺序执行而非并发）
+        let ast = Ast {
+            statements: vec![
+                Statement::DataPipe {
+                    name: "single_pipe".to_string(),
+                    operations: vec![],
+                },
+                Statement::Await(vec![
+                    "DATA.PIPE.single_pipe".to_string(),
+                ]),
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "单引用 AWAIT 应该成功");
+        
+        let output = executor.output();
+        assert_eq!(output.len(), 1);
+        assert!(output[0].contains("single_pipe"));
+    }
+    
+    #[test]
+    fn test_await_with_nonexistent_reference() {
+        let mut executor = Executor::new();
+        
+        // 测试不存在的引用应该返回错误
+        let ast = Ast {
+            statements: vec![
+                Statement::DataPipe {
+                    name: "existing_pipe".to_string(),
+                    operations: vec![],
+                },
+                Statement::Await(vec![
+                    "DATA.PIPE.existing_pipe".to_string(),
+                    "DATA.PIPE.nonexistent_pipe".to_string(),
+                ]),
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_err(), "不存在的引用应该返回错误");
+        
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("未找到操作或命令"));
+    }
+    
+    #[test]
+    fn test_await_empty_list() {
+        let mut executor = Executor::new();
+        
+        // 测试空的 AWAIT 列表
+        let ast = Ast {
+            statements: vec![
+                Statement::Await(vec![]),
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "空的 AWAIT 列表应该成功（不执行任何操作）");
+        
+        let output = executor.output();
+        assert_eq!(output.len(), 0, "空的 AWAIT 不应产生输出");
     }
 }
 

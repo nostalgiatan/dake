@@ -11,6 +11,7 @@ clap = { version = "4.5.48", features = ["derive"] }
 error = { path = "src/crates/error" }
 regex = "1.12.1"
 semver = "1.0.27"
+smol = "2.0.2"
 zstd = "0.13.3"
 
 [workspace]
