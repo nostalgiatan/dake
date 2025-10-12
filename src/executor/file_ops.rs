@@ -2,7 +2,7 @@
  * 文件操作 (File Operations)
  *
  * 处理文件的读取、写入和遍历。
- * 严格禁止使用 ../、.../ 和 ./
+ * 使用 Path::components 严格检查，禁止任何相对路径组件（..、.）以防止路径遍历攻击。
  */
 
 use std::fs;
@@ -45,14 +45,41 @@ pub struct FileOperations;
 impl FileOperations {
     /// 验证路径安全性
     ///
-    /// 禁止使用 ../、.../ 和 ./
+    /// 禁止使用相对路径组件（..、.）和路径遍历攻击
+    /// 使用 Path::components 规范化检查，拒绝任何 ParentDir 或 CurDir 组件
+    /// 同时检查字符串模式以捕获所有形式的相对路径
     pub fn validate_path(path: &str) -> Result<(), FileOpError> {
-        if path.contains("../") || path.contains(".../") || path.starts_with("./") {
+        // 首先检查常见的不安全模式（包括被 Path::components 规范化掉的情况）
+        if path.contains("../") || path.contains(".../") 
+            || path.starts_with("./") || path.contains("/./") 
+            || path.ends_with("/.") || path == "." || path == ".." {
             return Err(FileOpError::new(
                 3001,
-                format!("路径不安全: {}，禁止使用 ../、.../ 和 ./", path),
+                format!("路径不安全: {}，禁止使用相对路径组件", path),
             ));
         }
+        
+        // 使用 Path::components 进行更严格的检查
+        // 拒绝任何包含 ParentDir (..) 或 CurDir (.) 的路径
+        let path_obj = Path::new(path);
+        for component in path_obj.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    return Err(FileOpError::new(
+                        3001,
+                        format!("路径不安全: {}，包含父目录引用 '..'", path),
+                    ));
+                }
+                std::path::Component::CurDir => {
+                    return Err(FileOpError::new(
+                        3001,
+                        format!("路径不安全: {}，包含当前目录引用 '.'", path),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        
         Ok(())
     }
     
@@ -188,6 +215,11 @@ mod tests {
         assert!(FileOperations::validate_path(".../path").is_err());
         assert!(FileOperations::validate_path("./path").is_err());
         assert!(FileOperations::validate_path("path/../file").is_err());
+        
+        // 新增：测试更复杂的相对路径绕过尝试
+        assert!(FileOperations::validate_path("a/./b").is_err(), "应该拒绝包含 '.' 的路径");
+        assert!(FileOperations::validate_path("a/b/..").is_err(), "应该拒绝路径末尾的 '..'");
+        assert!(FileOperations::validate_path("path/to/../file").is_err(), "应该拒绝路径中的 '..'");
     }
 
     #[test]
