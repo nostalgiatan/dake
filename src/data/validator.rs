@@ -7,6 +7,7 @@
 
 use error::{ErrorInfo, Result};
 use std::fmt;
+use crate::data::RegexCache;
 
 /// 验证错误信息
 ///
@@ -53,6 +54,7 @@ impl fmt::Display for ValidationError {
 /// 验证器
 ///
 /// 提供数据验证功能，支持链式验证规则。
+/// 可选地使用 RegexCache 来缓存正则表达式以提高性能。
 ///
 /// # 示例
 ///
@@ -67,13 +69,27 @@ impl fmt::Display for ValidationError {
 /// assert!(result.is_err());
 /// ```
 #[allow(dead_code)]
-pub struct Validator;
+pub struct Validator {
+    /// 可选的正则表达式缓存
+    regex_cache: Option<RegexCache>,
+}
 
 #[allow(dead_code)]
 impl Validator {
-    /// 创建新的验证器
+    /// 创建新的验证器（不使用缓存）
     pub fn new() -> Self {
-        Self
+        Self { regex_cache: None }
+    }
+
+    /// 创建带缓存的验证器
+    ///
+    /// # 参数
+    /// * `cache` - 正则表达式缓存
+    ///
+    /// # 返回
+    /// 返回新的验证器实例
+    pub fn with_cache(cache: RegexCache) -> Self {
+        Self { regex_cache: Some(cache) }
     }
 
     /// 验证非空
@@ -208,11 +224,18 @@ impl Validator {
     /// * 4005 - 正则表达式编译失败
     /// * 4006 - 值不匹配正则表达式
     pub fn validate_pattern(&self, field: &str, value: &str, pattern: &str) -> Result<()> {
-        use regex::Regex;
-
-        let re = Regex::new(pattern).map_err(|e| {
-            ErrorInfo::new(4005, format!("正则表达式编译失败: {}", e))
-        })?;
+        // 优先使用缓存，如果可用的话
+        let re = if let Some(cache) = &self.regex_cache {
+            cache.get_or_compile(pattern).map_err(|e| {
+                ErrorInfo::new(4005, format!("正则表达式编译失败: {}", e.message()))
+            })?
+        } else {
+            use regex::Regex;
+            use std::sync::Arc;
+            Arc::new(Regex::new(pattern).map_err(|e| {
+                ErrorInfo::new(4005, format!("正则表达式编译失败: {}", e))
+            })?)
+        };
 
         if !re.is_match(value) {
             Err(ErrorInfo::new(

@@ -129,6 +129,7 @@ enum TaskType {
 impl Executor {
     /// 创建新的执行器
     pub fn new() -> Self {
+        let regex_cache = RegexCache::new();
         Self {
             context: ExecutionContext::new(),
             data_ops: HashMap::new(),
@@ -136,8 +137,8 @@ impl Executor {
             commands: HashMap::new(),
             errors: HashMap::new(),
             crypto: None,
-            regex_cache: RegexCache::new(),
-            validator: Validator::new(),
+            regex_cache: regex_cache.clone(),
+            validator: Validator::with_cache(regex_cache),
             compressor: Compressor::new(),
             output_buffer: Vec::new(),
         }
@@ -364,9 +365,23 @@ impl Executor {
                 // 实际执行数据验证
                 let resolved_value = self.context.interpolate(value);
                 
+                // 标准化验证器名称为大写以支持大小写不敏感
+                let validator_upper = validator.to_uppercase();
+                
                 // 根据验证器类型执行相应的验证
-                let result = match validator.as_str() {
+                let result = match validator_upper.as_str() {
                     "NOT_EMPTY" => self.validator.validate_not_empty(key, &resolved_value),
+                    "NOT_NULL" => {
+                        // 对于 NOT_NULL，检查值是否为 "null" 字符串、变量未插值（仍为 ${...} 形式）或空字符串
+                        // 这些情况都视为 None
+                        if resolved_value.is_empty() 
+                            || resolved_value == "null" 
+                            || (resolved_value.starts_with("${") && resolved_value.ends_with("}")) {
+                            self.validator.validate_not_null::<String>(key, &None)
+                        } else {
+                            self.validator.validate_not_null(key, &Some(resolved_value.clone()))
+                        }
+                    }
                     "EMAIL" => self.validator.validate_email(key, &resolved_value),
                     "URL" => self.validator.validate_url(key, &resolved_value),
                     "NUMERIC" => self.validator.validate_numeric(key, &resolved_value),
@@ -396,6 +411,8 @@ impl Executor {
             
             Statement::DataSeria { format, value } => {
                 // 实际执行序列化操作
+                // 注意：序列化结果以十六进制字符串形式存储在上下文中（键名为 _serialized_<原值>）
+                // 这样便于在 DSL 中传递二进制数据
                 let resolved_value = self.context.interpolate(value);
                 
                 // 构造 SerializableValue
@@ -437,6 +454,7 @@ impl Executor {
             
             Statement::DataDeseria { format, data } => {
                 // 实际执行反序列化操作
+                // 注意：期望输入数据为十六进制字符串格式（来自 DATA.SERIA 的输出）
                 let resolved_data = self.context.interpolate(data);
                 
                 // 从十六进制字符串转换回字节数组
@@ -477,6 +495,7 @@ impl Executor {
             
             Statement::DataComp { level, data } => {
                 // 实际执行压缩操作
+                // 注意：压缩结果以十六进制字符串形式存储在上下文中（键名为 _compressed_<原值>）
                 let resolved_data = self.context.interpolate(data);
                 let bytes = resolved_data.as_bytes();
                 
@@ -525,6 +544,7 @@ impl Executor {
             
             Statement::DataDecomp { data } => {
                 // 实际执行解压缩操作
+                // 注意：期望输入数据为十六进制字符串格式（来自 DATA.COMP 的输出）
                 let resolved_data = self.context.interpolate(data);
                 
                 // 从十六进制字符串转换回字节数组
@@ -1498,6 +1518,86 @@ mod tests {
         
         let result = executor.execute(&ast);
         assert!(result.is_err(), "邮箱验证应该失败");
+    }
+    
+    #[test]
+    fn test_data_vali_not_null_success() {
+        let mut executor = Executor::new();
+        executor.context.set_local("username".to_string(), Value::String("john".to_string()));
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataVali {
+                    validator: "NOT_NULL".to_string(),
+                    key: "username".to_string(),
+                    value: "${username}".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "NOT_NULL 验证应该成功");
+    }
+    
+    #[test]
+    fn test_data_vali_not_null_failure() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataVali {
+                    validator: "NOT_NULL".to_string(),
+                    key: "missing".to_string(),
+                    value: "${missing}".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_err(), "NOT_NULL 验证应该失败（变量不存在）");
+    }
+    
+    #[test]
+    fn test_data_vali_not_null_literal_null() {
+        let mut executor = Executor::new();
+        
+        let ast = Ast {
+            statements: vec![
+                Statement::DataVali {
+                    validator: "NOT_NULL".to_string(),
+                    key: "value".to_string(),
+                    value: "null".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_err(), "NOT_NULL 验证应该失败（字面值 'null'）");
+    }
+    
+    #[test]
+    fn test_data_vali_case_insensitive() {
+        let mut executor = Executor::new();
+        executor.context.set_local("username".to_string(), Value::String("john".to_string()));
+        
+        // 测试小写验证器名称
+        let ast = Ast {
+            statements: vec![
+                Statement::DataVali {
+                    validator: "not_null".to_string(),
+                    key: "username".to_string(),
+                    value: "${username}".to_string(),
+                },
+                Statement::DataVali {
+                    validator: "not_empty".to_string(),
+                    key: "username".to_string(),
+                    value: "${username}".to_string(),
+                },
+            ],
+        };
+        
+        let result = executor.execute(&ast);
+        assert!(result.is_ok(), "小写验证器名称应该被支持");
     }
     
     #[test]

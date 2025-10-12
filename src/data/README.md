@@ -51,8 +51,8 @@ assert_eq!(cache.size().expect("获取大小失败"), 1);
 
 - **链式操作**: 支持 map、filter、fold、take、skip 等操作
 - **类型安全**: 利用 Rust 的类型系统确保正确性
-- **零成本抽象**: 编译时优化，无运行时开销
-- **惰性求值**: 操作延迟执行，提高性能
+- **即时求值**: 每个操作在调用时立即执行并收集结果到新的 Vec
+- **高效处理**: 使用迭代器优化，提供可预测的性能特征
 
 #### 使用示例
 
@@ -103,20 +103,31 @@ assert_eq!(result, vec![2, 4, 6]);
 
 #### 核心特性
 
-- **丰富的验证规则**: 非空、长度、范围、格式等
+- **丰富的验证规则**: 非空、非 null、长度、范围、格式等
 - **链式验证**: 支持多个验证规则组合
 - **详细的错误信息**: 提供明确的错误描述
 - **类型安全**: 利用泛型支持多种类型
+- **性能优化**: 可选地使用 RegexCache 缓存正则表达式，避免重复编译
+- **大小写不敏感**: DSL 中的验证器名称支持大小写不敏感
 
 #### 使用示例
 
 ```rust
-use dake::data::Validator;
+use dake::data::{Validator, RegexCache};
 
+// 创建不带缓存的验证器
 let validator = Validator::new();
+
+// 或者创建带 RegexCache 的验证器以提高性能
+let cache = RegexCache::new();
+let validator = Validator::with_cache(cache);
 
 // 验证非空
 validator.validate_not_empty("name", "John").expect("验证失败");
+
+// 验证非 null
+let username: Option<String> = Some("john".to_string());
+validator.validate_not_null("username", &username).expect("验证失败");
 
 // 验证长度
 validator.validate_min_length("password", "secret123", 8).expect("验证失败");
@@ -143,16 +154,19 @@ validator
 
 #### 验证规则
 
-- `validate_not_empty` - 验证非空
+支持的验证器（所有名称支持大小写不敏感）：
+
+- `validate_not_empty` / `NOT_EMPTY` - 验证非空
+- `validate_not_null` / `NOT_NULL` - 验证非 null（检查变量是否存在且非 "null" 字符串）
 - `validate_min_length` - 验证最小长度
 - `validate_max_length` - 验证最大长度
 - `validate_range` - 验证数值范围
-- `validate_pattern` - 验证正则表达式模式
-- `validate_email` - 验证邮箱格式
-- `validate_url` - 验证 URL 格式
-- `validate_numeric` - 验证数字字符串
-- `validate_alpha` - 验证字母字符串
-- `validate_alphanumeric` - 验证字母数字字符串
+- `validate_pattern` - 验证正则表达式模式（使用 RegexCache 优化性能）
+- `validate_email` / `EMAIL` - 验证邮箱格式
+- `validate_url` / `URL` - 验证 URL 格式
+- `validate_numeric` / `NUMERIC` - 验证数字字符串
+- `validate_alpha` / `ALPHA` - 验证字母字符串
+- `validate_alphanumeric` / `ALPHANUMERIC` - 验证字母数字字符串
 
 ### 4. 数据序列化 (SerializableValue)
 
@@ -283,47 +297,79 @@ DATA.RE("^https?://[^\\s/$.?#].[^\\s]*$")
 
 ### 数据验证
 
+所有验证器名称支持大小写不敏感（not_null 和 NOT_NULL 都可以使用）。
+
 ```dsl
-# 验证非 null
-DATA.VALI.not_null(username, value)
+# 验证非 null（支持大小写）
+DATA.VALI.NOT_NULL(username, ${username})
+DATA.VALI.not_null(username, ${username})
 
 # 验证非空
-DATA.VALI.not_empty(email, value)
+DATA.VALI.NOT_EMPTY(email, ${email})
+DATA.VALI.not_empty(email, ${email})
 
-# 验证最小长度
-DATA.VALI.min_length(password, value)
+# 验证邮箱格式
+DATA.VALI.EMAIL(email, ${email})
+DATA.VALI.email(email, ${email})
 
-# 验证最大长度
-DATA.VALI.max_length(description, value)
+# 验证 URL 格式
+DATA.VALI.URL(website, ${website})
+DATA.VALI.url(website, ${website})
+
+# 验证数字
+DATA.VALI.NUMERIC(age, ${age})
+DATA.VALI.numeric(age, ${age})
+
+# 验证字母
+DATA.VALI.ALPHA(name, ${name})
+DATA.VALI.alpha(name, ${name})
+
+# 验证字母数字
+DATA.VALI.ALPHANUMERIC(username, ${username})
+DATA.VALI.alphanumeric(username, ${username})
 ```
 
+注意：
+- NOT_NULL 验证器会检查变量是否存在且非字面值 "null"
+- 如果变量未定义或值为 "null" 字符串，验证将失败
+- 所有其他验证器对字符串值进行验证
+
 ### 序列化和反序列化
+
+序列化结果以十六进制字符串形式存储在上下文中，键名格式为 `_serialized_<原值>`。
+反序列化期望输入数据为十六进制字符串格式。
 
 ```dsl
 # JSON 序列化
 DATA.SERIA.JSON(mydata)
+# 结果存储在 ${_serialized_mydata} 中，格式为十六进制字符串
 
 # 二进制序列化
 DATA.SERIA.BIN(mydata)
+# 结果存储在 ${_serialized_mydata} 中，格式为十六进制字符串
 
-# JSON 反序列化
-DATA.DESERIA.JSON(rawdata)
+# JSON 反序列化（输入应为十六进制字符串）
+DATA.DESERIA.JSON(${_serialized_mydata})
 
-# 二进制反序列化
-DATA.DESERIA.BIN(rawdata)
+# 二进制反序列化（输入应为十六进制字符串）
+DATA.DESERIA.BIN(${_serialized_mydata})
 ```
 
 ### 压缩和解压缩
 
+压缩结果以十六进制字符串形式存储在上下文中，键名格式为 `_compressed_<原值>`。
+解压缩期望输入数据为十六进制字符串格式。
+
 ```dsl
 # 使用默认压缩级别
 DATA.COMP(mydata)
+# 结果存储在 ${_compressed_mydata} 中，格式为十六进制字符串
 
 # 使用指定压缩级别（1-22）
 DATA.COMP(3, mydata)
 
-# 解压缩
-DATA.DECOMP(compressed)
+# 解压缩（输入应为十六进制字符串）
+DATA.DECOMP(${_compressed_mydata})
 ```
 
 ## 性能特点
@@ -334,9 +380,9 @@ DATA.DECOMP(compressed)
 - **并发读取**: 支持多个读者同时访问
 
 ### 数据管道
-- **零成本抽象**: 编译时优化，无运行时开销
-- **惰性求值**: 减少不必要的计算
-- **内存高效**: 避免中间结果的额外分配
+- **即时求值**: 每个操作在调用时立即执行并收集结果
+- **高效迭代**: 基于标准库的迭代器优化
+- **内存可控**: 每个操作产生清晰的中间结果
 
 ### 数据压缩
 - **高压缩比**: 使用 zstd 算法，对重复数据可达到 95% 以上的压缩比
