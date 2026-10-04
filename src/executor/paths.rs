@@ -67,3 +67,67 @@ pub(super) fn walk_files(dir: &Path, deep: bool, suffix: Option<&str>, exclude: 
     }
     Ok(())
 }
+
+const CHUNK: usize = 1024 * 1024;
+
+pub(super) fn hash_chunks(path: &str) -> std::io::Result<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::with_capacity(CHUNK, file);
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hasher.finalize().to_hex().to_string())
+}
+
+pub(super) fn read_chunks(path: &str) -> std::io::Result<Vec<u8>> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut reader = std::io::BufReader::with_capacity(CHUNK, file);
+    let mut out = Vec::new();
+    if let Ok(len) = reader.get_ref().metadata().map(|meta| meta.len()) {
+        out.try_reserve(len as usize).ok();
+    }
+    let mut buf = vec![0u8; CHUNK];
+    loop {
+        let n = reader.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn hash_chunks_matches_a_file_larger_than_one_block() {
+        let dir = std::env::temp_dir().join(format!("dake_hash_chunks_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.bin");
+        let mut bytes = vec![7u8; 1024 * 1024 + 3];
+        bytes[1024 * 1024 + 2] = 9;
+        std::fs::write(&path, &bytes).unwrap();
+        let got = super::hash_chunks(&path.to_string_lossy()).unwrap();
+        assert_eq!(got, blake3::hash(&bytes).to_hex().to_string());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+pub(super) fn write_chunks(path: &str, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let file = std::fs::File::create(path)?;
+    let mut writer = std::io::BufWriter::with_capacity(CHUNK, file);
+    for piece in bytes.chunks(CHUNK) {
+        writer.write_all(piece)?;
+    }
+    writer.flush()
+}

@@ -20,6 +20,8 @@ mod paths;
 pub mod preflight;
 mod select;
 mod serve;
+mod store;
+mod depot;
 
 /// 文件操作
 pub mod file_ops;

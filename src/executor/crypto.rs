@@ -112,29 +112,55 @@ impl CryptoOperations {
     /// - `Ok(Vec<u8>)`: 加密后的数据（nonce + ciphertext）
     /// - `Err(CryptoError)`: 加密失败
     pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>, CryptoError> {
-        let cipher = XChaCha20Poly1305::new(&self.key.into());
-        
-        // 生成 nonce
-        let nonce = if self.deterministic {
-            // deterministic 模式：使用数据的哈希作为 nonce
-            self.generate_deterministic_nonce(data)
+        let mut out = Vec::new();
+        self.encrypt_to(&mut std::io::Cursor::new(data), &mut out)?;
+        Ok(out)
+    }
+
+    /// 按 1 MiB 分块写出。帧头是 `DAKE` 加版本 `2`。每块是 24 字节 nonce 和密文。
+    pub fn encrypt_to(&self, input: &mut impl std::io::Read, output: &mut impl std::io::Write) -> Result<(), CryptoError> {
+        use std::io::{Read, Write};
+        output.write_all(b"DAKE\x02").map_err(|err| CryptoError::new(2002, err.to_string()))?;
+        let mut buf = vec![0u8; 1024 * 1024];
+        let mut index = 0u64;
+        loop {
+            let mut filled = 0;
+            while filled < buf.len() {
+                match input.read(&mut buf[filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(err) => return Err(CryptoError::new(2002, err.to_string())),
+                }
+            }
+            if filled == 0 {
+                break;
+            }
+            let nonce = self.chunk_nonce(index);
+            index += 1;
+            let cipher = XChaCha20Poly1305::new((&self.key).into());
+            let ciphertext = cipher.encrypt(&nonce, &buf[..filled])
+                .map_err(|err| CryptoError::new(2002, format!("加密失败: {err}")))?;
+            let len = (24 + ciphertext.len()) as u32;
+            output.write_all(&len.to_le_bytes()).map_err(|err| CryptoError::new(2002, err.to_string()))?;
+            output.write_all(nonce.as_ref()).map_err(|err| CryptoError::new(2002, err.to_string()))?;
+            output.write_all(&ciphertext).map_err(|err| CryptoError::new(2002, err.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn chunk_nonce(&self, index: u64) -> XNonce {
+        if self.deterministic {
+            let mut hasher = blake3::Hasher::new_keyed(&self.key);
+            hasher.update(&index.to_le_bytes());
+            let hash = hasher.finalize();
+            let mut nonce_bytes = [0u8; 24];
+            nonce_bytes.copy_from_slice(&hash.as_bytes()[..24]);
+            XNonce::from(nonce_bytes)
         } else {
-            // 随机 nonce
             let mut nonce_bytes = [0u8; 24];
             OsRng.fill_bytes(&mut nonce_bytes);
             XNonce::from(nonce_bytes)
-        };
-        
-        // 加密
-        let ciphertext = cipher
-            .encrypt(&nonce, data)
-            .map_err(|e| CryptoError::new(2002, format!("加密失败: {}", e)))?;
-        
-        // 返回 nonce + ciphertext
-        let mut result = nonce.to_vec();
-        result.extend_from_slice(&ciphertext);
-        
-        Ok(result)
+        }
     }
     
     /// 解密数据
@@ -146,6 +172,44 @@ impl CryptoOperations {
     /// - `Ok(Vec<u8>)`: 解密后的数据
     /// - `Err(CryptoError)`: 解密失败
     pub fn decrypt(&self, encrypted_data: &[u8]) -> Result<Vec<u8>, CryptoError> {
+        if encrypted_data.starts_with(b"DAKE\x02") {
+            let mut plain = Vec::new();
+            self.decrypt_to(&mut std::io::Cursor::new(encrypted_data), &mut plain)?;
+            return Ok(plain);
+        }
+        self.decrypt_whole(encrypted_data)
+    }
+
+    fn decrypt_to(&self, input: &mut impl std::io::Read, output: &mut impl std::io::Write) -> Result<(), CryptoError> {
+        use std::io::{Read, Write};
+        let mut magic = [0u8; 5];
+        input.read_exact(&mut magic).map_err(|err| CryptoError::new(2003, err.to_string()))?;
+        if &magic != b"DAKE\x02" {
+            return Err(CryptoError::new(2003, "不是分块密文".into()));
+        }
+        let cipher = XChaCha20Poly1305::new((&self.key).into());
+        loop {
+            let mut len_buf = [0u8; 4];
+            match input.read_exact(&mut len_buf) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(err) => return Err(CryptoError::new(2004, err.to_string())),
+            }
+            let len = u32::from_le_bytes(len_buf) as usize;
+            if len < 24 {
+                return Err(CryptoError::new(2003, "分块过短".into()));
+            }
+            let mut frame = vec![0u8; len];
+            input.read_exact(&mut frame).map_err(|err| CryptoError::new(2004, err.to_string()))?;
+            let (nonce_bytes, ciphertext) = frame.split_at(24);
+            let plain = cipher.decrypt(XNonce::from_slice(nonce_bytes), ciphertext)
+                .map_err(|err| CryptoError::new(2004, format!("解密失败: {err}")))?;
+            output.write_all(&plain).map_err(|err| CryptoError::new(2004, err.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn decrypt_whole(&self, encrypted_data: &[u8]) -> Result<Vec<u8>, CryptoError> {
         if encrypted_data.len() < 24 {
             return Err(CryptoError::new(
                 2003,
@@ -230,6 +294,13 @@ mod tests {
         let ops2 = CryptoOperations::with_key(&key, true).expect("创建实例失败");
         let decrypted2 = ops2.decrypt(&encrypted1).expect("解密失败");
         assert_eq!(data, decrypted2.as_slice());
+        let cipher = XChaCha20Poly1305::new((&ops.key).into());
+        let mut old_nonce = [0u8; 24];
+        OsRng.fill_bytes(&mut old_nonce);
+        let old = cipher.encrypt(XNonce::from_slice(&old_nonce), data.as_slice()).unwrap();
+        let mut legacy = old_nonce.to_vec();
+        legacy.extend_from_slice(&old);
+        assert_eq!(ops.decrypt(&legacy).unwrap(), data);
     }
 
     #[test]

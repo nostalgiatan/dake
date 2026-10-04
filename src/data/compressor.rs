@@ -98,8 +98,15 @@ impl Compressor {
     /// * 6001 - 压缩失败
     #[allow(dead_code)]
     pub fn compress(&self, data: &[u8], level: CompressionLevel) -> Result<Vec<u8>> {
-        zstd::encode_all(data, level.to_level())
-            .map_err(|e| ErrorInfo::new(6001, format!("zstd 压缩失败: {}", e)))
+        let mut out = Vec::new();
+        let mut encoder = zstd::stream::Encoder::new(&mut out, level.to_level())
+            .map_err(|e| ErrorInfo::new(6001, format!("zstd 压缩失败: {}", e)))?;
+        for piece in data.chunks(1024 * 1024) {
+            std::io::Write::write_all(&mut encoder, piece)
+                .map_err(|e| ErrorInfo::new(6001, format!("zstd 压缩失败: {}", e)))?;
+        }
+        encoder.finish().map_err(|e| ErrorInfo::new(6001, format!("zstd 压缩失败: {}", e)))?;
+        Ok(out)
     }
 
     /// 使用 zstd 解压缩数据
@@ -114,8 +121,12 @@ impl Compressor {
     /// * 6002 - 解压缩失败
     #[allow(dead_code)]
     pub fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        zstd::decode_all(data)
-            .map_err(|e| ErrorInfo::new(6002, format!("zstd 解压缩失败: {}", e)))
+        let mut out = Vec::new();
+        let mut decoder = zstd::stream::Decoder::new(data)
+            .map_err(|e| ErrorInfo::new(6002, format!("zstd 解压缩失败: {}", e)))?;
+        std::io::Read::read_to_end(&mut decoder, &mut out)
+            .map_err(|e| ErrorInfo::new(6002, format!("zstd 解压缩失败: {}", e)))?;
+        Ok(out)
     }
 
     /// 计算压缩比

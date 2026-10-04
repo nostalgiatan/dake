@@ -79,9 +79,10 @@ pub enum Inst {
     Lib(LibDefinition),
     Repo(RepoDefinition),
     Print(String),
-    Url { name: String, address: String },
+    Url { name: String, address: String, cert: Option<String>, key: Option<String> },
     Dir { name: String, path: String, suffix: Option<String>, deep: bool, exclude: Vec<String> },
-    Serve { routes: Vec<RouteIr> },
+    Share { name: String },
+    Serve { workers: u32, routes: Vec<RouteIr>, repo: Option<String> },
     Package,
 }
 
@@ -101,6 +102,8 @@ enum SourceKind { Url, Dir }
 struct Gate {
     names: HashMap<String, SourceKind>,
     seen_serve: bool,
+    seen_lib: bool,
+    seen_repo: bool,
 }
 
 pub fn lower(image: &Image) -> Result<Program, String> {
@@ -181,7 +184,9 @@ pub fn lower(image: &Image) -> Result<Program, String> {
 
     check_replacements(&structs)?;
 
-    Ok(Program { entry: image.entry.clone(), insts, actions, errors, structs })
+    let program = Program { entry: image.entry.clone(), insts, actions, errors, structs };
+    check_parallel(&program)?;
+    Ok(program)
 }
 
 fn check_field_clause(struct_name: &str, field: &StructField) -> Result<(), String> {
@@ -267,6 +272,30 @@ fn same_type(left: &FieldType, right: &FieldType) -> bool {
     }
 }
 
+fn check_parallel(program: &Program) -> Result<(), String> {
+    let mut shared = HashSet::new();
+    for inst in &program.insts {
+        match inst {
+            Inst::Share { name } => {
+                shared.insert(name.clone());
+            }
+            Inst::Serve { workers, routes, .. } if *workers > 1 => {
+                for route in routes {
+                    let action = program.actions.get(&route.action).ok_or_else(|| format!("未找到行为 {}", route.action))?;
+                    for name in &action.writes {
+                        if name == "result" || name == "status" || name == "headers" || shared.contains(name) {
+                            continue;
+                        }
+                        return Err(format!("行为 {} 写入 {name}，并行时只能写 result、status、headers 或 share 过的名字", route.action));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn check_struct(name: &str, from: Carrier, layout: &LayoutKind, sep: Option<&str>, order: Endian, fields: &[StructField]) -> Result<(), String> {
     let names: HashSet<_> = fields.iter().map(|f| f.name.as_str()).collect();
     if names.len() != fields.len() {
@@ -307,6 +336,22 @@ fn check_struct(name: &str, from: Carrier, layout: &LayoutKind, sep: Option<&str
     }
     if fields.iter().any(|field| field.width.is_some()) {
         return Err(format!("结构 {name} 只有 width 可以写字段宽度"));
+    }
+    if matches!(layout, LayoutKind::Block) {
+        if sep.is_some() {
+            return Err(format!("结构 {name} 的 block 不能写 sep"));
+        }
+        if fields.is_empty() {
+            return Err(format!("结构 {name} 没有字段"));
+        }
+        let ok = match from {
+            Carrier::Str => fields.iter().all(|field| matches!(field.ty, FieldType::Str | FieldType::Int | FieldType::Float | FieldType::Bool)),
+            Carrier::Bytes => fields.iter().all(|field| field.ty == FieldType::Bytes),
+        };
+        if !ok {
+            return Err(format!("结构 {name} 的 block 在 from: str 时字段只能是 str、int、float 或 bool，在 from: bytes 时只能是 bytes"));
+        }
+        return Ok(());
     }
     if matches!(layout, LayoutKind::Json) {
         if from != Carrier::Str {
@@ -349,7 +394,7 @@ fn check_struct(name: &str, from: Carrier, layout: &LayoutKind, sep: Option<&str
             [_] => Err(format!("结构 {name} 的 whole 字段类型必须与 from 一致")),
             _ => Err(format!("结构 {name} 的 whole 只能有一个字段")),
         },
-        (_, LayoutKind::Split | LayoutKind::Json | LayoutKind::Width) => Ok(()),
+        (_, LayoutKind::Split | LayoutKind::Json | LayoutKind::Width | LayoutKind::Block) => Ok(()),
         (Carrier::Bytes, LayoutKind::Whole) => match fields {
             [field] if field.ty == FieldType::Bytes => Ok(()),
             [_] => Err(format!("结构 {name} 的 whole 字段类型必须与 from 一致")),
@@ -402,10 +447,20 @@ fn lower_stmts(
         }
         match stmt {
                 Statement::Use { .. } | Statement::Action { .. } | Statement::ErrorDef { .. } | Statement::Struct { .. } => {}
-            Statement::Url { name, address } => {
+            Statement::Url { name, address, cert, key } => {
                 bind_source(top, gate, name, SourceKind::Url)?;
                 check_host_port(address)?;
-                out.push(Inst::Url { name: name.clone(), address: address.clone() });
+                let cert = cert.as_ref().map(literal_string).transpose()?;
+                let key = key.as_ref().map(literal_string).transpose()?;
+                match (&cert, &key) {
+                    (Some(cert), Some(key)) => {
+                        pathcheck::tighten(cert)?;
+                        pathcheck::tighten(key)?;
+                    }
+                    (None, None) => {}
+                    _ => return Err("cert 与 key 必须同时给出".into()),
+                }
+                out.push(Inst::Url { name: name.clone(), address: address.clone(), cert, key });
             }
             Statement::Dir { name, path, suffix, deep, exclude } => {
                 bind_source(top, gate, name, SourceKind::Dir)?;
@@ -418,7 +473,8 @@ fn lower_stmts(
                     exclude: exclude.as_ref().map(literal_list).transpose()?.unwrap_or_default(),
                 });
             }
-            Statement::Serve { routes } => {
+            Statement::Share { name } => out.push(Inst::Share { name: name.clone() }),
+            Statement::Serve { workers, routes, repo } => {
                 if !top {
                     return Err("serve 不能写在行为、if 或 each 里面".into());
                 }
@@ -426,7 +482,13 @@ fn lower_stmts(
                     return Err("serve 只能有一个".into());
                 }
                 gate.seen_serve = true;
-                out.push(Inst::Serve { routes: lower_routes(image, file, routes, gate)? });
+                if let Some(name) = repo {
+                    if gate.names.get(name) != Some(&SourceKind::Url) {
+                        return Err(format!("serve 的 repo 要写在 url 上: {name}"));
+                    }
+                }
+                let workers = workers.as_ref().map(literal_workers).transpose()?.unwrap_or(1);
+                out.push(Inst::Serve { workers, routes: lower_routes(image, file, routes, gate)?, repo: repo.clone() });
             }
             Statement::Route(_) => return Err("route 不能写在 serve 外面".into()),
             Statement::Set { key, value } => {
@@ -529,12 +591,33 @@ fn lower_stmts(
             }
             Statement::Stop => out.push(Inst::Stop),
             Statement::Lib(lib) => {
+                if !top {
+                    return Err("lib 不能写在行为、if 或 each 里面".into());
+                }
+                if gate.seen_lib {
+                    return Err("lib 只能有一个".into());
+                }
+                gate.seen_lib = true;
                 let mut lib = lib.clone();
                 let path = pathcheck::tighten(&lib.out_dir).map_err(|_| format!("输出目录不安全: {}", lib.out_dir))?;
                 lib.out_dir = path;
+                if !lib.sign.is_empty() {
+                    lib.sign = pathcheck::tighten(&lib.sign).map_err(|_| format!("签名密钥路径不安全: {}", lib.sign))?;
+                }
                 out.push(Inst::Lib(lib));
             }
-            Statement::Repo(repo) => out.push(Inst::Repo(repo.clone())),
+            Statement::Repo(repo) => {
+                if !top {
+                    return Err("repo 不能写在行为、if 或 each 里面".into());
+                }
+                if gate.seen_repo {
+                    return Err("repo 只能有一个".into());
+                }
+                gate.seen_repo = true;
+                let mut repo = repo.clone();
+                repo.dir = pathcheck::tighten(&repo.dir).map_err(|_| format!("仓库目录不安全: {}", repo.dir))?;
+                out.push(Inst::Repo(repo));
+            }
         }
     }
     Ok(())
@@ -586,6 +669,44 @@ fn check_host_port(address: &str) -> Result<(), String> {
         return Err(format!("地址必须是 主机:端口: {address}"));
     }
     Ok(())
+}
+
+fn specialize_shared(key: &str, args: &[Arg]) -> Result<(ResolvedPath, Vec<Arg>), String> {
+    let positional: Vec<_> = args.iter().filter(|arg| matches!(arg, Arg::Pos(_))).cloned().collect();
+    let need = if key == "shared.add" { 2 } else { 3 };
+    if positional.len() != need {
+        return Err(format!("{key} 的参数个数不符"));
+    }
+    let Arg::Pos(name_expr) = &positional[0] else { unreachable!() };
+    let Expr::Name(path) = name_expr else {
+        return Err(format!("{key} 的名字必须是标识符"));
+    };
+    if !path.modules.is_empty() {
+        return Err(format!("{key} 的名字必须是标识符"));
+    }
+    let mut out = vec![Arg::Pos(Expr::Literal(Value::String(path.behavior.clone())))];
+    if key == "shared.set" {
+        let Arg::Pos(field_expr) = &positional[1] else { unreachable!() };
+        let Expr::Name(field) = field_expr else {
+            return Err("shared.set 的字段必须是标识符".into());
+        };
+        if !field.modules.is_empty() {
+            return Err("shared.set 的字段必须是标识符".into());
+        }
+        out.push(Arg::Pos(Expr::Literal(Value::String(field.behavior.clone()))));
+        out.push(positional[2].clone());
+    } else {
+        out.push(positional[1].clone());
+    }
+    Ok((ResolvedPath::Builtin(key.into()), out))
+}
+
+fn literal_workers(expr: &Expr) -> Result<u32, String> {
+    match expr {
+        Expr::Literal(Value::Number(n)) if (1..=64).contains(n) => Ok(*n as u32),
+        Expr::Literal(Value::Number(_)) => Err("workers 要在 1 到 64 之间".into()),
+        _ => Err("workers 需要整数".into()),
+    }
 }
 
 fn literal_string(expr: &Expr) -> Result<String, String> {
@@ -654,7 +775,7 @@ fn lower_routes(image: &Image, file: &PathBuf, routes: &[RouteDecl], gate: &Gate
             })
         }).ok_or_else(|| format!("找不到行为 {name}"))?;
         let captures = pattern.as_ref().map(|item| item.captures.len()).unwrap_or(0);
-        if params.len() != 1 + captures {
+        if params.len() != 1 + captures && params.len() != 2 + captures {
             return Err(format!("行为 {name} 的参数个数不符"));
         }
         out.push(RouteIr {
@@ -723,7 +844,8 @@ fn builtin_name(path: &NamePath) -> Option<String> {
     };
     const BUILTINS: &[&str] = &[
         "files", "files.all", "files.encry", "files.decry",
-        "files.read", "files.write", "files.rows", "files.write.rows", "files.list", "pack", "unpack",
+        "files.read", "files.write", "files.rows", "files.each", "files.field", "files.write.rows", "files.write.row", "files.list", "files.verify", "files.seal", "files.unseal", "pack", "unpack",
+        "shared.add", "shared.set",
         "net.url", "net.get", "net.post", "net.accept",
         "files.read.bytes", "files.read.str", "files.write.bytes", "files.write.str",
         "base64.encode", "base64.decode",
@@ -736,6 +858,7 @@ fn builtin_name(path: &NamePath) -> Option<String> {
         "utf8.encode", "utf8.decode",
         "cmd", "list.of", "list.len", "record",
         "sys.host", "sys.cpu", "sys.mem", "sys.disk", "sys.disks",
+        "crypto.pair", "repo.put", "repo.get", "repo.fetch", "repo.push",
     ];
     BUILTINS.iter().find(|name| **name == full).map(|name| (*name).to_string())
 }
@@ -871,6 +994,9 @@ fn specialize_io(
     } else {
         format!("{}.{}", path.modules.join("."), path.behavior)
     };
+    if key == "shared.add" || key == "shared.set" {
+        return specialize_shared(&key, args);
+    }
     if key == "files.read" || key == "files.rows" || key == "text.decode" {
         let positional: Vec<_> = args.iter().filter(|arg| matches!(arg, Arg::Pos(_))).cloned().collect();
         if positional.len() >= 2 && (key != "files.rows" || positional.len() == 2) {
@@ -891,6 +1017,12 @@ fn specialize_io(
     }
     if key == "list.map" || key == "list.keep" {
         return specialize_each_action(image, file, &key, args);
+    }
+    if key == "files.each" {
+        return specialize_files_each(image, file, args);
+    }
+    if key == "files.field" {
+        return specialize_files_field(image, file, args);
     }
     if key == "record" {
         return specialize_record(image, file, args);
@@ -989,11 +1121,26 @@ fn specialize_net(image: &Image, file: &PathBuf, key: &str, args: &[Arg]) -> Res
 }
 
 fn specialize_accept(image: &Image, file: &PathBuf, args: &[Arg]) -> Result<(ResolvedPath, Vec<Arg>), String> {
-    if args.len() != 3 || args.iter().any(|arg| matches!(arg, Arg::Named { .. })) {
+    let positional: Vec<_> = args.iter().filter(|arg| matches!(arg, Arg::Pos(_))).cloned().collect();
+    if positional.len() != 3 {
         return Err("net.accept 需要地址、结构和行为".into());
     }
-    let id = struct_ref(image, file, &args[1])?;
-    let Arg::Pos(Expr::Name(path)) = &args[2] else {
+    let mut saw_cert = false;
+    let mut saw_key = false;
+    for arg in args {
+        if let Arg::Named { name, .. } = arg {
+            match name.as_str() {
+                "cert" => saw_cert = true,
+                "key" => saw_key = true,
+                _ => return Err(format!("net.accept 没有 {name}")),
+            }
+        }
+    }
+    if saw_cert != saw_key {
+        return Err("cert 与 key 必须同时给出".into());
+    }
+    let id = struct_ref(image, file, &positional[1])?;
+    let Arg::Pos(Expr::Name(path)) = &positional[2] else {
         return Err("net.accept 的行为必须是名字".into());
     };
     let resolved = resolve_path(image, file, path)?;
@@ -1007,13 +1154,78 @@ fn specialize_accept(image: &Image, file: &PathBuf, args: &[Arg]) -> Result<(Res
             _ => None,
         })
     }).ok_or_else(|| format!("找不到行为 {name}"))?;
+    if params.len() != 1 && params.len() != 2 {
+        return Err("net.accept 的行为只能有一个或两个参数".into());
+    }
+    let mut rest = vec![
+        positional[0].clone(),
+        Arg::Pos(Expr::Literal(Value::String(id))),
+        Arg::Pos(Expr::Literal(Value::String(action_file.display().to_string()))),
+        Arg::Pos(Expr::Literal(Value::String(name.clone()))),
+    ];
+    rest.extend(args.iter().filter(|arg| matches!(arg, Arg::Named { .. })).cloned());
+    Ok((ResolvedPath::Builtin("net.accept".into()), rest))
+}
+
+fn specialize_files_each(image: &Image, file: &PathBuf, args: &[Arg]) -> Result<(ResolvedPath, Vec<Arg>), String> {
+    let positional: Vec<_> = args.iter().filter(|arg| matches!(arg, Arg::Pos(_))).cloned().collect();
+    if positional.len() != 3 {
+        return Err("files.each 需要路径、结构和行为".into());
+    }
+    let id = struct_ref(image, file, &positional[1])?;
+    let Arg::Pos(Expr::Name(path)) = &positional[2] else {
+        return Err("files.each 的行为必须是名字".into());
+    };
+    let resolved = resolve_path(image, file, path)?;
+    let ResolvedPath::User { file: action_file, name } = &resolved else {
+        return Err("files.each 的行为必须是脚本里的行为".into());
+    };
+    let params = image.files.get(action_file).and_then(|ast| {
+        ast.statements.iter().find_map(|stmt| match stmt {
+            Statement::Action { name: n, params, .. } if n == name => Some(params.clone()),
+            Statement::Pipe { name: n, params, .. } if n == name => Some(params.clone()),
+            _ => None,
+        })
+    }).ok_or_else(|| format!("找不到行为 {name}"))?;
     if params.len() != 1 {
-        return Err("net.accept 的行为只能有一个参数".into());
+        return Err("files.each 的行为只能有一个参数".into());
+    }
+    let mut rest = vec![
+        positional[0].clone(),
+        Arg::Pos(Expr::Literal(Value::String(id))),
+        Arg::Pos(Expr::Literal(Value::String(action_file.display().to_string()))),
+        Arg::Pos(Expr::Literal(Value::String(name.clone()))),
+    ];
+    rest.extend(args.iter().filter(|arg| matches!(arg, Arg::Named { .. })).cloned());
+    Ok((ResolvedPath::Builtin("files.each".into()), rest))
+}
+
+fn specialize_files_field(image: &Image, file: &PathBuf, args: &[Arg]) -> Result<(ResolvedPath, Vec<Arg>), String> {
+    let positional: Vec<_> = args.iter().filter(|arg| matches!(arg, Arg::Pos(_))).cloned().collect();
+    if positional.len() != 3 {
+        return Err("files.field 需要路径、结构和行为".into());
+    }
+    let id = struct_ref(image, file, &positional[1])?;
+    let Arg::Pos(Expr::Name(path)) = &positional[2] else {
+        return Err("files.field 的行为必须是名字".into());
+    };
+    let resolved = resolve_path(image, file, path)?;
+    let ResolvedPath::User { file: action_file, name } = &resolved else {
+        return Err("files.field 的行为必须是脚本里的行为".into());
+    };
+    let params = image.files.get(action_file).and_then(|ast| {
+        ast.statements.iter().find_map(|stmt| match stmt {
+            Statement::Action { name: n, params, .. } if n == name => Some(params.clone()),
+            _ => None,
+        })
+    }).ok_or_else(|| format!("找不到行为 {name}"))?;
+    if params.len() != 2 {
+        return Err("files.field 的行为只能有两个参数".into());
     }
     Ok((
-        ResolvedPath::Builtin("net.accept".into()),
+        ResolvedPath::Builtin("files.field".into()),
         vec![
-            args[0].clone(),
+            positional[0].clone(),
             Arg::Pos(Expr::Literal(Value::String(id))),
             Arg::Pos(Expr::Literal(Value::String(action_file.display().to_string()))),
             Arg::Pos(Expr::Literal(Value::String(name.clone()))),

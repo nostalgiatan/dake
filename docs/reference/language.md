@@ -12,7 +12,7 @@
 | `csv.clean` | 别名 `csv` 里的 `clean` |
 | `tools::pack.seal` | 别名 `tools::pack` 里的 `seal` |
 
-内置行为：`files`、`files.all`、`files.encry`、`files.decry`、`files.read`、`files.rows`、`files.list`、`files.name`、`files.dir`、`files.write`、`files.write.rows`、`files.read.bytes`、`files.read.str`、`files.write.bytes`、`files.write.str`、`base64.encode`、`base64.decode`、`text.lines`、`text.join`、`text.decode`、`text.encode`、`update`、`list.of`、`list.add`、`list.set`、`list.remove`、`list.map`、`list.keep`、`list.update`、`list.join`、`list.where`、`list.pick`、`list.sort`、`list.group`、`list.len`、`record`、`object`、`log.init`、`log.info`、`log.error`、`data.re`、`data.re.find`、`data.re.group`、`data.re.all`、`data.re.replace`、`utf8.encode`、`utf8.decode`、`data.vali`、`data.seria`、`data.deseria`、`data.comp`、`data.decomp`、`pack`、`unpack`、`net.url`、`net.get`、`net.post`、`net.accept`、`cmd`、`sys.host`、`sys.cpu`、`sys.mem`、`sys.disk`、`sys.disks`。语句 `url`、`dir`、`serve`、`route` 用于持续运行。
+内置行为的参数、返回值和失败条件见 [内置行为](builtins.md)。语句 `url`、`dir`、`serve`、`route` 用于持续运行，仍在本页。
 
 ## 值
 
@@ -32,8 +32,8 @@
 | 行为 | `action 名字(参数, ...):` 后接缩进块。名字必填。参数个数必须与调用一致。 |
 | 管道 | `pipe 名字:` 或 `pipe 名字(参数, ...):`。后接每行一条路径，路径后可以有参数列表。步骤按顺序执行，参数与行为相同 |
 | 条件 | `if 表达式:`、`elif 表达式:`、`else:` |
-| 数据包 | `lib:` 字段 `name`、`version`、`desc`、`repo`、`keywords`、`readme`、`mods`、`out_dir`。`version` 是语义化版本字符串。`keywords` 与 `mods` 是字符串列表。 |
-| 仓库 | `repo:` 字段 `name`、`capacity`（MiB）、`max_pkgs` |
+| 数据包 | `lib:` 一份脚本最多一个。`name` 与 `version` 必填。`version` 是语义化版本。二者都只能是一个路径段：不能空，不能是 `.` 或 `..`，不能含 `/`、`\` 或空字节。`desc`、`repo`、`keywords`、`readme`、`mods`、`out_dir` 可省略。`out_dir` 省略为 `output`。`keywords` 与 `mods` 是字符串列表。`mods` 只写入清单。 |
+| 仓库 | `repo:` 一份脚本最多一个。`name` 与 `dir` 必填。`capacity`（MiB）与 `max_pkgs` 可省略，省略表示不设上限；写成 `0` 就是上限为 0。 |
 | 打印 | `print(表达式)` |
 | 执行 | `doing 路径` |
 | 并发 | `await 路径, 路径, ...`。这些行为写入的变量名若相交，编译失败。各分支在独立线程上执行，可以读取文件、访问已设置的网络目标、调用其他行为。结构、错误说明、网络目标与加密状态在进入 `await` 时共享为快照。写入的变量、收进包的路径和 `pack` 的记录在全部分支结束后合并。 |
@@ -52,7 +52,7 @@
 
 ## 结构
 
-`struct` 声明载体、切分和字段。`from` 是 `str` 或 `bytes`。`layout` 是 `whole`、`lines`、`split`、`json` 或 `width`。
+`struct` 声明载体、切分和字段。`from` 是 `str` 或 `bytes`。`layout` 是 `whole`、`lines`、`split`、`json`、`width` 或 `block`。
 
 ```dsl
 struct note:
@@ -62,7 +62,7 @@ struct note:
     body: str
 ```
 
-`whole` 只有一个字段，类型与 `from` 相同。`lines` 只适用于 `from: str`，并且正好两个 `str` 字段：第一行、其余行。`split` 只适用于 `from: str`，用结构头 `sep` 切开整段文本。`sep` 是非空字符串，不是字段。字段类型只能是 `str`、`int`、`float`、`bool`。字段含分隔符、引号或换行时用双引号包起来，引号本身写成两个双引号。`json` 只适用于 `from: str`，把 JSON 对象的键对应到字段。字段类型可以是 `str`、`int`、`float`、`bool`、`bytes`、`list` 或另一个结构。`float` 字段接受 JSON 小数，也接受 JSON 整数。`width` 只适用于 `from: bytes`。结构头 `order` 是 `be` 或 `le`，省略时是 `be`。结构头 `replaces: 旧结构名` 表示这个结构接替旧结构，旧结构名可以写成 `别名.结构名`。一个旧结构只能被替换一次。可以连着替换，出现环则编译失败。
+`whole` 只有一个字段，类型与 `from` 相同。`lines` 只适用于 `from: str`，并且正好两个 `str` 字段：第一行、其余行。`split` 只适用于 `from: str`，用结构头 `sep` 切开整段文本。`sep` 是非空字符串，不是字段。字段类型只能是 `str`、`int`、`float`、`bool`。字段含分隔符、引号或换行时用双引号包起来，引号本身写成两个双引号。`json` 只适用于 `from: str`，把 JSON 对象的键对应到字段。字段类型可以是 `str`、`int`、`float`、`bool`、`bytes`、`list` 或另一个结构。`float` 字段接受 JSON 小数，也接受 JSON 整数。`block` 把每个字段写成一块：4 字节小端长度，然后是这一块。读的时候一块一块解码，不把整份文件收成一个缓冲区再切开。`from: str` 时字段只能是 `str`、`int`、`float`、`bool`，块内容是 UTF-8。`from: bytes` 时每个字段都是 `bytes`。一块超过 4 GiB、块不完整或末尾还有多余字节则失败。记录本身仍包含全部字段。`width` 只适用于 `from: bytes`。结构头 `order` 是 `be` 或 `le`，省略时是 `be`。结构头 `replaces: 旧结构名` 表示这个结构接替旧结构，旧结构名可以写成 `别名.结构名`。一个旧结构只能被替换一次。可以连着替换，出现环则编译失败。
 
 `str` 字段可以写 `check: 验证器`，验证器是 `not_empty`、`email`、`url`、`numeric`、`alpha`、`alphanumeric`。`str`、`int`、`float`、`bool` 可以写 `default: 字面量`，类型必须与字段一致。带 `check` 的默认值在编译时就要通过检查。`take: 旧字段名` 表示替换时从旧结构的这个字段取值，不写则按同名取值。
 
@@ -81,7 +81,7 @@ struct person:
     email: str
 ```
 
-`text.decode(文本, person)` 得到记录。`text.encode(记录)` 按该记录的分隔符拼回字符串。`list.add(列表, 值)` 返回新列表。`list.of()` 可以没有元素。`list.len(列表)` 返回整数。`list.map(列表, 行为)` 对每一项调用该行为，行为只能有一个参数，并且必须 `set(result, 值)`，返回这些值组成的新列表。`list.keep(列表, 行为)` 同样调用，`result` 为真时留下原来的项。`list.update(列表, 字段, 值)` 对每条记录替换该字段，返回新列表。记录必须是同一种结构，字段必须存在，值的类型必须相符。`list.where(列表, 字段, 值)` 留下该字段与值相等的记录。`list.pick(列表, 结构)` 按结果结构的字段名从来源复制，丢掉来源多出的字段。结果字段在来源中没有，或类型不符，运行失败。`list.sort(列表, 字段)` 按该字段升序，同值保持原来的先后。`order: "desc"` 为降序。字段类型只能是 `str`、`int`、`float`、`bool`。`list.group(列表, 字段, 结果结构)` 按字段值分组。组的顺序是第一次出现的顺序，组内保持原顺序。结果结构必须正好是该字段再加一个 `list` 字段，列表元素是来源那种结构。组键类型不符，或多出别的字段，运行失败。以上四条在空列表时得到空列表。`list.join(左列表, 左字段, 右列表, 右字段, 结果结构)` 留下两边字段值相等的行，按结果结构的字段名从两边填入。两边都有且值不同、两边都没有、类型不符，或连接字段的类型不同，运行失败。任一边为空时得到空列表。`files.rows(路径, 结构)` 把文本文件的每一行解码成记录并返回列表，结构必须是 `split` 或 `json`。空文件得到空列表。`header: true` 时第一行必须是该结构的字段名，顺序与声明一致，返回值不含这一行；名字不符或文件为空则失败。`header` 只适用于 `split`。`files.write.rows(路径, 列表)` 把同一种记录按行写回。`header: true` 先写字段名，`header: "一行"` 把该字符串原样写在第一行。`append: true` 接在已有内容之后；文件不存在则创建；已有内容末尾不是换行时先补一个换行。`append` 与 `header` 同时给出则失败。省略 `append` 时整份覆盖。
+`text.decode(文本, person)` 得到记录。`text.encode(记录)` 按该记录的分隔符拼回字符串。`list.add(列表, 值)` 返回新列表。`list.of()` 可以没有元素。`list.len(列表)` 返回整数。`list.map(列表, 行为)` 对每一项调用该行为，行为只能有一个参数，并且必须 `set(result, 值)`，返回这些值组成的新列表。`list.keep(列表, 行为)` 同样调用，`result` 为真时留下原来的项。`list.update(列表, 字段, 值)` 对每条记录替换该字段，返回新列表。记录必须是同一种结构，字段必须存在，值的类型必须相符。`list.where(列表, 字段, 值)` 留下该字段与值相等的记录。`list.pick(列表, 结构)` 按结果结构的字段名从来源复制，丢掉来源多出的字段。结果字段在来源中没有，或类型不符，运行失败。`list.sort(列表, 字段)` 按该字段升序，同值保持原来的先后。`order: "desc"` 为降序。字段类型只能是 `str`、`int`、`float`、`bool`。`list.group(列表, 字段, 结果结构)` 按字段值分组。组的顺序是第一次出现的顺序，组内保持原顺序。结果结构必须正好是该字段再加一个 `list` 字段，列表元素是来源那种结构。组键类型不符，或多出别的字段，运行失败。以上四条在空列表时得到空列表。`list.join(左列表, 左字段, 右列表, 右字段, 结果结构)` 留下两边字段值相等的行，按结果结构的字段名从两边填入。两边都有且值不同、两边都没有、类型不符，或连接字段的类型不同，运行失败。任一边为空时得到空列表。`files.rows(路径, 结构)` 把文本文件的每一行解码成记录并返回列表，结构必须是 `split` 或 `json`。空文件得到空列表。`files.each(路径, 结构, 行为)` 按行解码后交给只有一个参数的行为，不收集 `result`，返回处理过的行数。某一行失败时停止。`files.field(路径, 结构, 行为)` 只用于 `block`：每块交给有两个参数的行为后丢掉，不组装成一条记录。`files.rows`、`pack`、`list.sort`、`list.group` 和 `list.join` 必须看见全部记录。`files.write.row(路径, 记录)` 追加一行后丢掉，不把已有文件读进内存。`files.read.bytes`、`files.read.str` 和 `files.write.bytes` 按块进出磁盘；得到的值仍是整份字节或字符串。压缩按块喂给 zstd。整包加密仍要先读完，因为校验覆盖全文。`header: true` 时第一行必须是该结构的字段名，顺序与声明一致，返回值不含这一行；名字不符或文件为空则失败。`header` 只适用于 `split`。`files.write.rows(路径, 列表)` 把同一种记录按行写回。`header: true` 先写字段名，`header: "一行"` 把该字符串原样写在第一行。`append: true` 接在已有内容之后；文件不存在则创建；已有内容末尾不是换行时先补一个换行。`append` 与 `header` 同时给出则失败。省略 `append` 时整份覆盖。
 
 `files.list(目录)` 返回这一层的文件路径，不把它们收进包。`suffix: ".csv"` 只保留文件名以此结尾的项。`deep: true` 进入子目录。`exclude: ["目录名"]` 在递归时跳过这些目录名。`files.name(路径)` 返回最后一段文件名，没有文件名则失败。`files.dir(路径)` 返回所在目录，只有文件名时返回 `.`。二者不读文件，也不收进包。路径里出现 `..` 是错误。
 
@@ -95,15 +95,15 @@ struct person:
 
 `net.get()` 返回字节。`net.get(结构)` 按该结构解码成一条记录，规则与 `files.read` 相同，并跑 `check`。`net.post(正文)` 发送字节、字符串或记录。记录按其自身结构编码。`net.post(正文, 结构)` 再解码响应。路径可以写在正文前面。响应不收进包。状态码不在 200 到 299 时失败。
 
-网络错误码：`4030` 地址，`4031` 连接，`4032` TLS，`4033` 状态码，`4034` 请求头或超时。正文对不上结构时仍用结构自己的错误码。
+网络错误码：`4030` 地址，`4031` 连接，`4032` TLS，`4033` 对方状态码，`4034` 请求头、响应的 `status` 与 `headers`，或超时。正文对不上结构时仍用结构自己的错误码。
 
-`net.accept(地址, 结构, 行为)` 只接一个明文请求后返回。地址写成 `主机:端口`。请求体按结构解码成一条记录，传给只有一个参数的行为。行为必须 `set(result, 记录或字节)`，这就是响应体，也是 `net.accept` 的返回值。不做路由、并发连接和 TLS 监听。请求头这一版不读成记录。
+`net.accept(地址, 结构, 行为)` 只接一个请求后返回。地址写成 `主机:端口`。`cert` 与 `key` 成对给出时用 TLS，省略则是明文。请求体按结构解码成一条记录，传给行为。行为有一个参数时只收记录；有两个参数时第二个是请求头对象，字段名是头的名字，值是字符串。带连字符的名字写成 `${headers}["Content-Type"]`。行为必须 `set(result, 记录或字节)`，这就是响应体，也是 `net.accept` 的返回值。同一行为可以 `set(status, 整数)`，范围是 100 到 599，省略时是 200。`set(headers, 对象)` 的键按原文发出，值必须是字符串；其中的 `Content-Type` 覆盖由布局补上的类型。`Content-Length` 与 `Connection` 由运行时写上。目录路由不读取这两个槽。不做路由和并发连接。
 
 ## 持续运行
 
-`url 名字 "主机:端口"` 和 `dir 名字 "目录"` 各给一类地址一个标识符。名字不能重复。`suffix`、`deep`、`exclude` 写在 `dir` 上，含义与 `files.list` 相同。
+`url 名字 "主机:端口"` 和 `dir 名字 "目录"` 各给一类地址一个标识符。名字不能重复。`suffix`、`deep`、`exclude` 写在 `dir` 上，含义与 `files.list` 相同。`url` 写上成对的 `cert` 与 `key`（PEM 路径）后，这个地址用 TLS 监听。省略则仍是明文。
 
-`serve:` 写在准备之后，块里只能是 `route`，后面不能再写语句。`route 名字 路径 结构 行为` 把事件分到行为。目录路由可以不写路径，那就是该目录的默认路由，每个 `dir` 最多一条。
+`serve:` 写在准备之后，块里是 `route`，还可以有一行 `repo 地址名`。地址必须是已经声明的 `url`，最多一行。写了这一行时，以 `/dake/v1/` 开头的路径由仓库协议处理，其余路径仍走 `route`。没写时，这些路径跟普通路由一样匹配。后面不能再写语句。`serve workers: 4:` 同时处理最多 4 个连接，省略时是 1。并行的请求各自看到启动时的变量，结束后只合并打印、收进包的文件和 `stop`，不把普通 `set` 写回主脚本。`share 名字` 把已有变量放进所有连接共用的表。`shared.add(名字, 整数)` 在锁里加上这个整数并返回新值。`shared.set(名字, 字段, 值)` 改共享记录或对象的一个字段。`workers` 是 1 到 64 的整数。大于 1 时，目录里的文件也按这个数量并行，和连接共用同一条规则：路由行为只能写 `result`、`status`、`headers`，或写在 `serve` 之前 `share` 过的名字。写入别的名字则编译失败。`route 名字 路径 结构 行为` 把事件分到行为。网络路由的行为可以比路径参数多一个：最后一个是请求头对象。目录路由上这个参数是空对象。目录路由可以不写路径，那就是该目录的默认路由，每个 `dir` 最多一条。
 
 路径按 `/` 分段。一段可以是字面量、`{名字}`、`*` 或末尾的 `**`。`{名字}.json` 这样的一段会接住后缀之前的文本。`{**名字}` 接住剩下的多段，用 `/` 拼成一个字符串。接住的名字按从左到右成为行为里记录参数之后的字符串参数。`.` 和 `..` 不会被参数接住。
 
@@ -111,7 +111,46 @@ struct person:
 
 网络没有匹配时返回 404，不读正文。非法百分号返回 400。行为失败或响应不是记录或字节时返回 500，服务继续。目录没有匹配且没有默认路由时跳过该文件。文件要等大小和修改时间稳定后才读取。
 
-启动时先按目录声明顺序、再按相对路径处理已有文件，然后才处理新到达的请求和文件。同一时刻只处理一件。`stop`、SIGINT 或 SIGTERM 结束整个 `serve`，当前这件做完后写出数据包。`net.accept` 仍只接一个明文请求；持续接请求用 `serve`。
+启动时先按目录声明顺序、再按相对路径处理已有文件，然后才处理新到达的请求和文件。省略 `workers` 时同一时刻只处理一件；写了 `workers` 时，连接和目录文件都最多同时处理那么多件。后来的连接由监听线程收下，最多排 32 个；排满后不再接受，直到空出位置。目录里的文件和请求正文按块读到解码之前。`stop`、SIGINT 或 SIGTERM 结束整个 `serve`，当前这件做完后写出数据包。`net.accept` 仍只接一个请求；持续接请求用 `serve`。
+
+## 仓库
+
+目录布局：
+
+| 路径 | 内容 |
+| --- | --- |
+| `dir/名字/版本/manifest.json` | 已提交清单 |
+| `dir/名字/版本/` 下清单点名的文件 | 包内文件，加密项保持 `.enc` 名字 |
+| `dir/名字/版本/dake.pub`、`dake.seal` | 有公钥签名时才有。写在 `files` 里则按普通文件核对哈希 |
+| `dir/.staging/名字/版本/` | 未提交的上传。不计入容量和包数，也不被 GET |
+
+`dake.key` 留在作者的 `out_dir`。仓库不复制、协议不收、也不发。`name` 与版本字符串各是一个路径段。
+
+`repo.put(目录)` 把来源复制到仓库盘上的暂存再提交，跳过名为 `dake.key` 的文件，来源目录不动，返回正式目录。`repo.get(名字, 版本)` 返回 `dir/名字/版本`。没有这份包则失败。脚本写完 `out_dir` 之后，若有 `repo`，用同一条提交放进去。`lib.repo` 有值时必须等于 `repo.name`；空着则把 `repo.name` 写入清单。没有 `repo` 时只写 `out_dir`。自动放入失败时 `out_dir` 保留，仓库保持原样。`files.seal` 仍是之后对目录的另一次调用。`files.unseal` 与 `files.verify` 不由仓库调用。`replaces` 只留在清单里，不删除旧版。
+
+提交规则：
+
+- 暂存里的 `manifest.json` 的 `name`、`version` 与目标路径一致。
+- 清单里每个文件都在，字节数等于 `bytes`，blake3 按 1 MiB 一块重算。`files` 里名字重复则失败。`files` 可以是空数组。
+- 除清单、清单点名的文件、未列入清单的 `dake.pub` 与 `dake.seal` 之外，多出来的文件失败。`dake.key` 与作为文件名的 `manifest.json` 失败。
+- `dir/名字/版本` 已存在则失败，不覆盖。
+- `max_pkgs` 数已提交的「名字/版本」目录，加上这一次。`capacity` 把这些目录里的文件字节相加，单位是 MiB。省略表示不设上限。写成 `0` 就是上限为 0。超出则删除暂存。
+- 通过后把暂存目录改名为正式目录。同一进程里提交共用一把锁。
+
+`repo.fetch(基址, 名字, 版本, 目标目录)` 要求目标目录还不存在。先取清单，再取每个文件。`dake.pub` 或 `dake.seal` 返回 200 时也写下。任一步失败则删除目标目录。返回目标目录。`depends` 不会被顺带取回。`repo.push(基址, 目录)` 按清单、清单里的文件、未列入清单且存在的 `dake.pub` 与 `dake.seal`、然后提交。返回 true。基址是 `http` 或 `https`。TLS 的 `ca` 沿用当前 `net.url`。这两条按 1 MiB 一块搬运正文，不经过 `net.get` 或 `net.post`。
+
+`serve` 写了 `repo 地址名` 时，该方法路径以 `/dake/v1/` 开头由下面的协议处理。路径先百分号解码，再做与文件路径相同的检查。末尾多一个斜杠，或出现 `..`，是 400。没有 `GET /dake/v1`。`/file/` 后面整段是相对路径，可以含斜杠。
+
+| 方法与路径 | 作用 | 成功 |
+| --- | --- | --- |
+| `PUT /dake/v1/{名字}/{版本}/manifest` | 删掉这一对的旧暂存，写入新清单。清单里的名字和版本必须与路径一致。不提交 | 201，正文 `ok` |
+| `PUT /dake/v1/{名字}/{版本}/file/{相对路径}` | 相对路径必须是清单里的 `files[].name`，或正好是 `dake.pub`、`dake.seal`。还没有这份暂存清单则失败。正文按 1 MiB 一块写入 | 201，正文 `ok` |
+| `POST /dake/v1/{名字}/{版本}` | 正文忽略。按提交规则改名。失败则删除暂存 | 201，正文 `ok` |
+| `GET /dake/v1/{名字}` | 已提交版本，按语义化版本排序。正文 `{"versions":["0.3.0"]}`。没有这个名字是 404 | 200，`application/json` |
+| `GET /dake/v1/{名字}/{版本}/manifest` | 清单原文 | 200，`application/json` |
+| `GET /dake/v1/{名字}/{版本}/file/{相对路径}` | 清单里的文件，以及存在的 `dake.pub`、`dake.seal`。不发 `dake.key` | 200，`application/octet-stream` |
+
+PUT 必须带与正文长度一致的 `Content-Length`。不接受分块传输。这些状态由协议自己写，不经过行为的 `set(status)`。路径或正文不合法是 400，没有这份包或文件是 404，版本已存在是 409，超过 `capacity` 或 `max_pkgs` 是 413。脚本侧：路径不合法 `3001`，没有这份包 `3002`，版本已存在 `3003`，容量或包数超出 `3010`，还没 PUT 清单就 PUT 文件 `4011`，清单对不上路径或哈希 `4012`。协议错误正文是这一句说明，不带 `位置`。同一对名字和版本同时只允许一次写入。GET 只读已经改名完成的目录。
 
 ## 宿主
 
@@ -131,7 +170,7 @@ struct person:
 
 `out_dir` 若以 `./` 开头，编译时去掉该前缀，重复的 `./` 同样去掉。空路径、空字节、出现 `..` 的路径，以及 `foo/./bar` 这样的 `.` 段都是错误。`use`、`dir` 和运行时读写使用同一套检查。符号链接的目标必须是相对路径，且不能含有 `..` 或单独的 `.` 段。绝对目标会被拒绝。
 
-程序结束时，若出现过 `lib`，在 `out_dir` 写入 `manifest.json` 和文件副本。清单字段：`name`、`version`、`desc`、`repo`、`keywords`、`readme`、`encrypted`、`files`（`name`、`bytes`、`blake3`、`struct`、`encrypted`）。`files` 收进的副本，`struct` 为空。`pack(包内名字, 记录列表)` 把同一种 `split` 或 `json` 记录按行编码后收进包，`struct` 是该结构的编号。`key: "密钥路径"` 用该文件里的 32 字节十六进制密钥先加密这一项，清单该项 `encrypted` 为 true，包内名字不变。密钥文件不存在时写入新密钥。`unpack(路径)` 读取该文件。同一次运行里若刚 `pack` 过这个名字，直接用那份记录；否则读取该文件所在目录的 `manifest.json`，用对应项的 `struct` 按行解码成记录列表。该项已加密时必须带同一把 `key`，先解密再解码；没写 `key` 则失败。`files.encry()` 仍加密其余项，已经用 `key` 加密的项不再包第二层。编号能在当前脚本里找到就用它；否则按结构短名匹配，必须恰好一个。`struct` 为空、清单里没有这个名字、或文件不是 UTF-8 时失败。空列表、混有别的结构、或没有 `lib` 时 `pack` 失败。`files.read` 不把文件收进包。若出现过 `repo`，文件数超过 `max_pkgs` 或总字节超过 `capacity` MiB 时不写入。
+程序结束时，若出现过 `lib`，在 `out_dir` 写入 `manifest.json` 和文件副本。清单字段：`name`、`version`、`desc`、`repo`、`keywords`、`readme`、`mods`、`depends`、`replaces`、`signature`、`encrypted`、`files`。`mods` 是字符串列表，仓库不按它去找脚本。`depends` 是 `"名字 版本"` 字符串列表。`replaces` 是被这份包替换的 `"名字 版本"`，可以空着。`sign` 是 32 字节或 64 位十六进制密钥的路径，不写入数据包。`signature` 是用这把密钥对包名、版本、`replaces`、`depends` 和每个文件的 blake3 做的消息鉴别码。`files.seal(目录, 私钥路径)` 用 Ed25519 PKCS8 私钥另签清单原文，写出 `dake.pub` 和 `dake.seal`，私钥不进包。`files.unseal(目录, 公钥路径)` 要求这份公钥与 `dake.pub` 相同，核对签名，再按 1 MiB 一块重算每个文件的 blake3。`files.verify(目录)` 用同样的方式重算哈希。清单有签名时必须带 `key`。`depend: [目录, ...]` 与 `depends` 一一对应，打开每个目录核对名字、版本、哈希和签名，不再往下展开那个包自己的依赖。`replace: 目录` 同样核对 `replaces`。清单写了依赖或替换却没给目录则失败。`files` 里每一项有 `name`、`bytes`、`blake3`、`struct`、`encrypted`。收进的副本 `struct` 为空。`pack(包内名字, 记录列表)` 把同一种 `split` 或 `json` 记录按行编码后收进包，`struct` 是该结构的编号。`key: "密钥路径"` 用该文件里的 32 字节十六进制密钥按 1 MiB 分块加密这一项。新密文以 `DAKE` 和版本 `2` 开头。没有这个帧头的旧密文仍按整段解开，清单该项 `encrypted` 为 true，包内名字不变。密钥文件不存在时写入新密钥。`unpack(路径)` 读取该文件。同一次运行里若刚 `pack` 过这个名字，直接用那份记录；否则读取该文件所在目录的 `manifest.json`，用对应项的 `struct` 按行解码成记录列表。该项已加密时必须带同一把 `key`，先解密再解码；没写 `key` 则失败。`files.encry()` 仍加密其余项，已经用 `key` 加密的项不再包第二层。编号能在当前脚本里找到就用它；否则按结构短名匹配，必须恰好一个。`struct` 为空、清单里没有这个名字、或文件不是 UTF-8 时失败。空列表、混有别的结构、或没有 `lib` 时 `pack` 失败。`files.read` 不把文件收进包。容量和包数在放入仓库时检查，不在写 `out_dir` 时检查。`dake check` 对字面的 `repo.dir` 做目录预检，失败码仍是 `4037`。自动放入失败时，`out_dir` 保留，仓库保持原样。
 
 `data.re(模式)` 编译正则并返回模式。`data.re.find(模式, 文本)` 返回第一处匹配，没有匹配是错误。`data.re.group(模式, 文本, 编号)` 返回捕获组，编号 0 是整段匹配。`data.re.all(模式, 文本)` 返回全部匹配的字符串列表。`data.re.replace(模式, 文本, 替换)` 替换全部匹配。`utf8.encode(字符串)` 返回 UTF-8 字节。`utf8.decode(字节)` 返回字符串，非法 UTF-8 是错误。`data.vali` 的第一个参数是验证器名：`not_empty`、`email`、`url`、`numeric`、`alpha`、`alphanumeric`。其后可以是字段名和值，或只有一个字符串值。`data.seria` 与 `data.deseria` 的第一个参数是 `json` 或 `bin`。`json` 进出的是字符串，`bin` 进出的是字节。反序列化得到布尔值、整数、小数、字符串、列表或对象。JSON 对象成为对象值，不要求事先声明结构。`data.comp` 接受字节或字符串，返回压缩后的字节；也可先给压缩级别。`data.decomp` 接受字节并返回字节。`cmd` 的第一个参数是可执行文件，其余是参数。
 

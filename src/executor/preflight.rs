@@ -11,9 +11,14 @@ pub fn check_image(image: &Image) -> Result<(), String> {
         match stmt {
             Statement::At { .. } | Statement::If { .. } | Statement::Each { .. } | Statement::Catch { .. }
             | Statement::Action { .. } | Statement::Pipe { .. } | Statement::Serve { .. } | Statement::Use { .. }
-            | Statement::Struct { .. } | Statement::ErrorDef { .. } | Statement::Lib(_) | Statement::Repo(_)
+            | Statement::Struct { .. } | Statement::ErrorDef { .. } | Statement::Lib(_)
             | Statement::Set { .. } | Statement::SetEnv { .. } | Statement::Print(_) | Statement::Doing(_)
-            | Statement::Await(_) | Statement::Stop | Statement::Url { .. } | Statement::Route(_) => {}
+            | Statement::Await(_) | Statement::Stop | Statement::Url { .. } | Statement::Share { .. } | Statement::Route(_) => {}
+            Statement::Repo(repo) => {
+                if let Err(err) = probe_dir(&repo.dir) {
+                    errors.push(format!("[错误][系统错误][错误码: 4037] {err}"));
+                }
+            }
             Statement::Dir { path, .. } => {
                 if let Err(err) = probe_dir(path) {
                     errors.push(format!("[错误][系统错误][错误码: 4037] {err}"));
@@ -62,9 +67,9 @@ fn call_key(path: &NamePath) -> String {
 }
 
 fn is_read(key: &str) -> bool {
-    matches!(key, "files" | "files.read" | "files.rows" | "files.read.bytes" | "files.read.str" | "unpack")
+    matches!(key, "files" | "files.read" | "files.rows" | "files.each" | "files.field" | "files.read.bytes" | "files.read.str" | "files.verify" | "files.seal" | "files.unseal" | "unpack")
 }
 
 fn is_write(key: &str) -> bool {
-    matches!(key, "files.write" | "files.write.rows" | "files.write.bytes" | "files.write.str")
+    matches!(key, "files.write" | "files.write.rows" | "files.write.row" | "files.write.bytes" | "files.write.str")
 }

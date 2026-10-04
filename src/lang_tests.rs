@@ -95,6 +95,22 @@ fn pipe_without_params_runs_and_missing_params_fail() {
 }
 
 #[test]
+fn crypto_pair_writes_a_new_key() {
+    let dir = std::env::temp_dir().join(format!("dake_pair_{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let private = dir.join("private.pkcs8");
+    let public = dir.join("public.key");
+    let src = format!("crypto.pair(\"{}\", \"{}\")\nprint(\"made\")\n", private.display(), public.display());
+    let output = assert_ok(&src);
+    assert!(output.iter().any(|line| line == "made"), "{output:?}");
+    assert_eq!(std::fs::read(&public).unwrap().len(), 32);
+    assert_err(&src, "密钥文件已存在");
+    assert_err(&format!("crypto.pair(\"{}\", \"{}\")\n", private.display(), private.display()), "同一个文件");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn files_manifest_and_each() {
     let dir = std::env::temp_dir().join(format!("dake_lang_files_{}", NEXT.fetch_add(1, Ordering::Relaxed)));
     let out = std::env::temp_dir().join(format!("dake_lang_out_{}", NEXT.fetch_add(1, Ordering::Relaxed)));
@@ -103,9 +119,12 @@ fn files_manifest_and_each() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("a.txt"), b"aaa").unwrap();
     std::fs::write(dir.join("b.txt"), b"bbb").unwrap();
+    let key_path = dir.join("sign.key");
+    std::fs::write(&key_path, "11".repeat(32)).unwrap();
     let src = format!(
-        "lib:\n    name: \"box\"\n    version: \"0.3.0\"\n    out_dir: \"{}\"\nfiles(\"{}/a.txt\", \"{}/b.txt\")\neach ${{file}} in files:\n    print(${{file}})\n",
+        "lib:\n    name: \"box\"\n    version: \"0.3.0\"\n    out_dir: \"{}\"\n    depends: [\"base 1.0.0\"]\n    replaces: \"box 0.2.0\"\n    sign: \"{}\"\nfiles(\"{}/a.txt\", \"{}/b.txt\")\neach ${{file}} in files:\n    print(${{file}})\n",
         out.display(),
+        key_path.display(),
         dir.display(),
         dir.display()
     );
@@ -115,6 +134,60 @@ fn files_manifest_and_each() {
     let manifest = std::fs::read_to_string(out.join("manifest.json")).unwrap();
     assert!(manifest.contains("a.txt"));
     assert!(manifest.contains("b.txt"));
+    assert!(manifest.contains("\"depends\": [\"base 1.0.0\"]"), "{manifest}");
+    assert!(manifest.contains("\"replaces\": \"box 0.2.0\""), "{manifest}");
+    assert!(!manifest.contains("sign.key"), "{manifest}");
+    let base = std::env::temp_dir().join(format!("dake_lang_base_{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join("c.txt"), b"ccc").unwrap();
+    let base_out = std::env::temp_dir().join(format!("dake_lang_base_out_{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&base_out);
+    let base_src = format!(
+        "lib:\n    name: \"base\"\n    version: \"1.0.0\"\n    out_dir: \"{}\"\n    sign: \"{}\"\nfiles(\"{}/c.txt\")\n",
+        base_out.display(),
+        key_path.display(),
+        base.display()
+    );
+    assert_ok(&base_src);
+    let old_out = std::env::temp_dir().join(format!("dake_lang_old_{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&old_out);
+    let old_src = format!(
+        "lib:\n    name: \"box\"\n    version: \"0.2.0\"\n    out_dir: \"{}\"\n    sign: \"{}\"\nfiles(\"{}/a.txt\")\n",
+        old_out.display(),
+        key_path.display(),
+        dir.display()
+    );
+    assert_ok(&old_src);
+    let verify = format!(
+        "files.verify(\"{}\", key: \"{}\", depend: [\"{}\"], replace: \"{}\")\nprint(\"ok\")\n",
+        out.display(),
+        key_path.display(),
+        base_out.display(),
+        old_out.display()
+    );
+    let checked = assert_ok(&verify);
+    assert!(checked.iter().any(|line| line == "ok"), "{checked:?}");
+    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new()).unwrap();
+    let private = dir.join("private.pkcs8");
+    std::fs::write(&private, pkcs8.as_ref()).unwrap();
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).unwrap();
+    let public = dir.join("public.key");
+    std::fs::write(&public, ring::signature::KeyPair::public_key(&pair).as_ref()).unwrap();
+    let seal = format!("files.seal(\"{}\", \"{}\")\nfiles.unseal(\"{}\", \"{}\")\nprint(\"sealed\")\n", out.display(), private.display(), out.display(), public.display());
+    let sealed = assert_ok(&seal);
+    assert!(sealed.iter().any(|line| line == "sealed"), "{sealed:?}");
+    assert_eq!(std::fs::read(out.join("dake.pub")).unwrap().len(), 32);
+    let saved = std::fs::read(out.join("manifest.json")).unwrap();
+    std::fs::write(out.join("manifest.json"), b"{}").unwrap();
+    assert_err(&format!("files.unseal(\"{}\", \"{}\")\n", out.display(), public.display()), "公钥签名不符");
+    std::fs::write(out.join("manifest.json"), saved).unwrap();
+    let original = std::fs::read(out.join("a.txt")).unwrap();
+    std::fs::write(out.join("a.txt"), b"zzz").unwrap();
+    assert_err(&format!("files.unseal(\"{}\", \"{}\")\n", out.display(), public.display()), "哈希不符");
+    std::fs::write(out.join("a.txt"), original).unwrap();
+    std::fs::write(out.join("a.txt"), b"zzz").unwrap();
+    assert_err(&verify, "哈希不符");
     let _ = std::fs::remove_dir_all(&dir);
     let _ = std::fs::remove_dir_all(&out);
 }
@@ -374,6 +447,45 @@ fn data_ops_use_text_and_bytes() {
     );
     assert_err("set(t, data.deseria(\"json\", \"null\"))\n", "空值");
     assert_err("set(t, data.decomp(\"hello\"))\n", "需要字节");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn files_each_streams_rows_without_a_list() {
+    let dir = std::env::temp_dir().join(format!("dake_each_{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("people.csv");
+    std::fs::write(&path, "name,age\nann,1\nbee,2\n").unwrap();
+    let src = format!(
+        "struct person:\n    from: str\n    layout: split\n    sep: \",\"\n    name: str\n    age: int\naction see(row):\n    print(${{row}}.name)\nset(n, files.each(\"{p}\", person, see, header: true))\nprint(str(${{n}}))\n",
+        p = path.display()
+    );
+    let output = assert_ok(&src);
+    assert!(output.iter().any(|line| line == "ann"), "{output:?}");
+    assert!(output.iter().any(|line| line == "bee"), "{output:?}");
+    assert!(output.iter().any(|line| line == "2"), "{output:?}");
+    assert!(!output.iter().any(|line| line == "name"), "{output:?}");
+    std::fs::write(&path, "").unwrap();
+    let empty = format!(
+        "struct person:\n    from: str\n    layout: split\n    sep: \",\"\n    name: str\n    age: int\naction see(row):\n    print(${{row}}.name)\nset(n, files.each(\"{p}\", person, see))\nprint(str(${{n}}))\n",
+        p = path.display()
+    );
+    let output = assert_ok(&empty);
+    assert!(output.iter().any(|line| line == "0"), "{output:?}");
+    std::fs::write(&path, "ann,1\nnope\n").unwrap();
+    let bad = format!(
+        "struct person:\n    from: str\n    layout: split\n    sep: \",\"\n    name: str\n    age: int\naction see(row):\n    print(${{row}}.name)\nfiles.each(\"{p}\", person, see)\n",
+        p = path.display()
+    );
+    assert_err(&bad, "字段个数不符");
+    let out = dir.join("out.csv");
+    let write = format!(
+        "struct person:\n    from: str\n    layout: split\n    sep: \",\"\n    name: str\n    age: int\nset(a, record(person, name, \"ann\", age, 1))\nfiles.write.row(\"{p}\", ${{a}}, header: true)\nset(b, record(person, name, \"bee\", age, 2))\nfiles.write.row(\"{p}\", ${{b}}, header: true)\nprint(files.read.str(\"{p}\"))\n",
+        p = out.display()
+    );
+    let output = assert_ok(&write);
+    assert!(output.iter().any(|line| line.contains("name,age") && line.contains("ann,1") && line.contains("bee,2")), "{output:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1443,7 +1555,10 @@ struct person:
     from: str
     layout: json
     name: str
-action answer(row):
+action answer(row, headers):
+    print(${{headers}}["Content-Type"])
+    set(status, 201)
+    set(headers, object("Location", "/people/1"))
     set(result, update(${{row}}, name, "ok"))
 set(reply, net.accept("{address}", person, answer))
 print(${{reply}}.name)
@@ -1451,13 +1566,75 @@ print(${{reply}}.name)
     );
     let output = assert_ok(&src);
     assert!(output.iter().any(|line| line == "ok"), "{output:?}");
+    assert!(output.iter().any(|line| line == "application/json"), "{output:?}");
     let response = client.join().unwrap();
-    assert!(response.contains("HTTP/1.1 200"), "{response}");
+    assert!(response.contains("HTTP/1.1 201"), "{response}");
+    assert!(response.contains("Location: /people/1"), "{response}");
     assert!(response.contains("\"name\":\"ok\""), "{response}");
     assert_err(
         "struct person:\n    from: str\n    layout: json\n    name: str\naction answer(row):\n    set(result, ${row}.name)\nnet.accept(\"https://127.0.0.1:9\", person, answer)\n",
         "主机:端口",
     );
+}
+
+#[test]
+fn net_accept_one_tls_request() {
+    assert_err("struct person:\n    from: str\n    layout: json\n    name: str\naction answer(row):\n    set(result, ${row})\nnet.accept(\"127.0.0.1:59999\", person, answer, cert: \"only.pem\")\n", "必须同时");
+    let key = rcgen::KeyPair::generate().unwrap();
+    let params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    let dir = std::env::temp_dir().join(format!("dake_accept_tls_{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cert_path = dir.join("cert.pem");
+    let key_path = dir.join("key.pem");
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, key.serialize_pem()).unwrap();
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let pem = cert.pem();
+    let client = std::thread::spawn(move || {
+        let mut roots = rustls::RootCertStore::empty();
+        for item in rustls_pemfile::certs(&mut std::io::Cursor::new(pem.into_bytes())) {
+            roots.add(item.unwrap()).unwrap();
+        }
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = std::sync::Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth());
+        let address = format!("127.0.0.1:{port}");
+        for _ in 0..50 {
+            if let Ok(mut tcp) = std::net::TcpStream::connect(&address) {
+                let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+                let mut session = rustls::ClientConnection::new(config, name).unwrap();
+                let mut tls = rustls::Stream::new(&mut session, &mut tcp);
+                let body = "{\"name\":\"ann\"}";
+                let request = format!("POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                tls.write_all(request.as_bytes()).unwrap();
+                return read_http(&mut tls).unwrap_or_default();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("等待接入");
+    });
+    let src = format!(
+        r#"
+struct person:
+    from: str
+    layout: json
+    name: str
+action answer(row):
+    set(result, update(${{row}}, name, "ok"))
+set(reply, net.accept("127.0.0.1:{port}", person, answer, cert: "{cert}", key: "{key}"))
+print(${{reply}}.name)
+"#,
+        cert = cert_path.display(),
+        key = key_path.display()
+    );
+    let output = assert_ok(&src);
+    assert!(output.iter().any(|line| line == "ok"), "{output:?}");
+    let response = client.join().unwrap();
+    assert!(response.contains("\"name\":\"ok\""), "{response}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1699,4 +1876,235 @@ serve:
     assert!(output.iter().any(|line| line == "ok"), "{output:?}");
     assert!(!output.iter().any(|line| line == "no"), "{output:?}");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn serve_url_listens_with_tls() {
+    assert_err("url api \"127.0.0.1:9\" cert: \"only.pem\"\nserve:\n    route api \"/\" person answer\n", "必须同时");
+    let key = rcgen::KeyPair::generate().unwrap();
+    let params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    let dir = std::env::temp_dir().join(format!("dake_serve_tls_{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let cert_path = dir.join("cert.pem");
+    let key_path = dir.join("key.pem");
+    std::fs::write(&cert_path, cert.pem()).unwrap();
+    std::fs::write(&key_path, key.serialize_pem()).unwrap();
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let pem = cert.pem();
+    let client = std::thread::spawn(move || {
+        let mut roots = rustls::RootCertStore::empty();
+        for item in rustls_pemfile::certs(&mut std::io::Cursor::new(pem.into_bytes())) {
+            roots.add(item.unwrap()).unwrap();
+        }
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let config = std::sync::Arc::new(rustls::ClientConfig::builder().with_root_certificates(roots).with_no_client_auth());
+        let address = format!("127.0.0.1:{port}");
+        for _ in 0..50 {
+            if let Ok(mut tcp) = std::net::TcpStream::connect(&address) {
+                let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+                let mut session = rustls::ClientConnection::new(config, name).unwrap();
+                let mut tls = rustls::Stream::new(&mut session, &mut tcp);
+                let body = "{\"name\":\"ann\"}";
+                let request = format!("POST /person HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                tls.write_all(request.as_bytes()).unwrap();
+                return read_http(&mut tls).unwrap_or_default();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("等待服务");
+    });
+    let src = format!(
+        r#"
+struct person:
+    from: str
+    layout: json
+    name: str
+action answer(row):
+    print(${{row}}.name)
+    set(result, ${{row}})
+    stop
+url api "127.0.0.1:{port}" cert: "{cert}" key: "{key}"
+serve:
+    route api "/person" person answer
+"#,
+        cert = cert_path.display(),
+        key = key_path.display()
+    );
+    let output = assert_ok(&src);
+    let body = client.join().unwrap();
+    assert!(body.contains("200"), "{body}");
+    assert!(body.contains("ann"), "{body}");
+    assert!(output.iter().any(|line| line == "ann"), "{output:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn serve_workers_handle_two_connections() {
+    assert_err("serve workers: 0:\n    route api \"/\" person answer\n", "1 到 64");
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let address = format!("127.0.0.1:{port}");
+    let client_address = address.clone();
+    let client = std::thread::spawn(move || {
+        for _ in 0..50 {
+            if let (Ok(mut first), Ok(mut second)) = (std::net::TcpStream::connect(&client_address), std::net::TcpStream::connect(&client_address)) {
+                let body = "{\"name\":\"ann\"}";
+                let request = format!("POST /person HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                first.write_all(request.as_bytes()).unwrap();
+                second.write_all(request.replace("ann", "bee").as_bytes()).unwrap();
+                let a = read_http(&mut first).unwrap_or_default();
+                let b = read_http(&mut second).unwrap_or_default();
+                if let Ok(mut done) = std::net::TcpStream::connect(&client_address) {
+                    let bye = "{\"name\":\"end\"}";
+                    let request = format!("POST /done HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{bye}", bye.len());
+                    let _ = done.write_all(request.as_bytes());
+                    let _ = read_http(&mut done);
+                }
+                return (a, b);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("等待服务");
+    });
+    let src = format!(
+        r#"
+struct person:
+    from: str
+    layout: json
+    name: str
+action answer(row):
+    print(${{row}}.name)
+    print(str(shared.add(n, 1)))
+    set(result, ${{row}})
+action quit(row):
+    set(result, ${{row}})
+    stop
+set(n, 0)
+share n
+url api "{address}"
+serve workers: 2:
+    route api "/person" person answer
+    route api "/done" person quit
+"#
+    );
+    let output = assert_ok(&src);
+    let (a, b) = client.join().unwrap();
+    assert!(a.contains("200") && b.contains("200"), "{a} {b}");
+    assert!(output.iter().any(|line| line == "ann"), "{output:?}");
+    assert!(output.iter().any(|line| line == "bee"), "{output:?}");
+    assert!(output.iter().any(|line| line == "1"), "{output:?}");
+    assert!(output.iter().any(|line| line == "2"), "{output:?}");
+}
+
+#[test]
+fn write_rows_append_does_not_reread_the_file() {
+    let dir = std::env::temp_dir().join(format!("dake_append_{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("people.csv");
+    std::fs::write(&path, "ann,1").unwrap();
+    let src = format!(
+        "struct person:\n    from: str\n    layout: split\n    sep: \",\"\n    name: str\n    age: int\nset(rows, list.of(record(person, name, \"bee\", age, 2)))\nfiles.write.rows(\"{p}\", ${{rows}}, append: true)\nprint(files.read.str(\"{p}\"))\n",
+        p = path.display()
+    );
+    let output = assert_ok(&src);
+    assert!(output.iter().any(|line| line.contains("ann,1\nbee,2")), "{output:?}");
+    let block = dir.join("note.bin");
+    let src = format!(
+        "struct note:\n    from: bytes\n    layout: block\n    name: bytes\n    body: bytes\nset(row, record(note, name, utf8.encode(\"ann\"), body, utf8.encode(\"hello\")))\nfiles.write(\"{p}\", ${{row}})\nset(back, files.read(\"{p}\", note))\nprint(utf8.decode(${{back}}.name))\nprint(utf8.decode(${{back}}.body))\naction take(name, value):\n    print(utf8.decode(${{value}}))\nfiles.field(\"{p}\", note, take)\n",
+        p = block.display()
+    );
+    let output = assert_ok(&src);
+    assert!(output.iter().any(|line| line == "ann"), "{output:?}");
+    assert!(output.iter().any(|line| line == "hello"), "{output:?}");
+    assert_err("struct note:\n    from: str\n    layout: block\n    name: bytes\n", "只能是 bytes");
+    assert_err(
+        "struct person:\n    from: str\n    layout: json\n    name: str\naction answer(row):\n    set(m, 1)\n    set(result, ${row})\nset(n, 0)\nshare n\nurl api \"127.0.0.1:9\"\nserve workers: 2:\n    route api \"/\" person answer\n",
+        "只能写 result",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn repo_stores_package_and_serves_protocol() {
+    assert_err("lib:\n    name: \"box\"\n", "缺少 version");
+    assert_err("repo:\n    name: \"desk\"\n", "缺少 dir");
+    let root = std::env::temp_dir().join(format!("dake_repo_{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    let _ = std::fs::remove_dir_all(&root);
+    let src_dir = root.join("src");
+    let out = root.join("out");
+    let repo = root.join("desk");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(src_dir.join("a.txt"), b"hello").unwrap();
+    let build = format!(
+        "lib:\n    name: \"box\"\n    version: \"0.3.0\"\n    out_dir: \"{}\"\n    mods: [\"tools\"]\nrepo:\n    name: \"desk\"\n    dir: \"{}\"\nfiles.encry()\nfiles(\"{}/a.txt\")\n",
+        out.display(),
+        repo.display(),
+        src_dir.display()
+    );
+    assert_ok(&build);
+    let manifest = std::fs::read_to_string(out.join("manifest.json")).unwrap();
+    assert!(manifest.contains("\"mods\": [\"tools\"]"), "{manifest}");
+    assert!(out.join("dake.key").is_file());
+    let stored = repo.join("box").join("0.3.0");
+    assert!(stored.join("a.txt.enc").is_file());
+    assert!(!stored.join("dake.key").exists());
+    assert_err(&format!("repo:\n    name: \"desk\"\n    dir: \"{}\"\nrepo.put(\"{}\")\n", repo.display(), out.display()), "已存在");
+    let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = probe.local_addr().unwrap().port();
+    drop(probe);
+    let fresh = root.join("fresh");
+    std::fs::create_dir_all(&fresh).unwrap();
+    let manifest_bytes = std::fs::read(out.join("manifest.json")).unwrap();
+    let file_bytes = std::fs::read(stored.join("a.txt.enc")).unwrap();
+    let upload = file_bytes.clone();
+    let client = std::thread::spawn(move || {
+        let address = format!("127.0.0.1:{port}");
+        for _ in 0..50 {
+            if let Ok(mut stream) = std::net::TcpStream::connect(&address) {
+                let manifest_res = http_put(&mut stream, "/dake/v1/box/0.3.0/manifest", &manifest_bytes);
+                let mut file_stream = std::net::TcpStream::connect(&address).unwrap();
+                let file_res = http_put(&mut file_stream, "/dake/v1/box/0.3.0/file/a.txt.enc", &upload);
+                let mut post = std::net::TcpStream::connect(&address).unwrap();
+                let post_res = http_put(&mut post, "/dake/v1/box/0.3.0", b"");
+                let _ = std::net::TcpStream::connect(&address).and_then(|mut done| {
+                    let body = b"{\"name\":\"x\"}";
+                    let request = format!("POST /stop HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    done.write_all(request.as_bytes())?;
+                    done.write_all(body)?;
+                    read_http(&mut done)
+                });
+                assert!(manifest_res.contains("201"), "{manifest_res}");
+                assert!(file_res.contains("201"), "{file_res}");
+                assert!(post_res.contains("201"), "{post_res}");
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("等待仓库");
+    });
+    let serve = format!(
+        "struct person:\n    from: str\n    layout: json\n    name: str\naction stop(row):\n    set(result, ${{row}})\n    stop\nrepo:\n    name: \"desk\"\n    dir: \"{}\"\nurl api \"127.0.0.1:{port}\"\nserve:\n    repo api\n    route api \"/stop\" person stop\n",
+        fresh.display()
+    );
+    assert_ok(&serve);
+    client.join().unwrap();
+    assert_eq!(std::fs::read(fresh.join("box/0.3.0/a.txt.enc")).unwrap(), file_bytes);
+    assert!(!fresh.join("box/0.3.0/dake.key").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+fn http_put(stream: &mut std::net::TcpStream, path: &str, body: &[u8]) -> String {
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+    let method = if path.ends_with("/0.3.0") { "POST" } else { "PUT" };
+    let request = format!("{method} {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.write_all(body).unwrap();
+    read_http(stream).unwrap_or_else(|err| err.to_string())
 }

@@ -70,6 +70,7 @@ fn name_token(token: &Token) -> Option<String> {
         Token::Url => "url".into(),
         Token::Dir => "dir".into(),
         Token::Serve => "serve".into(),
+        Token::Share => "share".into(),
         Token::Route => "route".into(),
         Token::Catch => "catch".into(),
         Token::Stop => "stop".into(),
@@ -138,6 +139,11 @@ impl Parser {
             Token::Pipe => self.parse_pipe(),
             Token::If => self.parse_if(),
             Token::Lib => self.parse_lib(),
+            Token::Repo if self.peek() == Some(&Token::Dot) => {
+                let path = self.parse_path()?;
+                let args = if self.current() == &Token::LParen { self.parse_arg_list()? } else { Vec::new() };
+                Ok(Statement::Call { path, args })
+            }
             Token::Repo => self.parse_repo(),
             Token::Print => self.parse_print(),
             Token::Doing => self.parse_doing(),
@@ -145,6 +151,7 @@ impl Parser {
             Token::Url => self.parse_url(),
             Token::Dir => self.parse_dir(),
             Token::Serve => self.parse_serve(),
+            Token::Share => self.parse_share(),
             Token::Route => self.parse_route_stmt(),
             Token::Catch => self.parse_catch(),
             Token::Stop => {
@@ -253,7 +260,8 @@ impl Parser {
                         "split" => LayoutKind::Split,
                         "json" => LayoutKind::Json,
                         "width" => LayoutKind::Width,
-                        other => return Err(self.fail(1004, format!("layout 只能是 whole、lines、split、json 或 width，得到 {other}"))),
+                        "block" => LayoutKind::Block,
+                        other => return Err(self.fail(1004, format!("layout 只能是 whole、lines、split、json、width 或 block，得到 {other}"))),
                     });
                 }
                 "sep" => {
@@ -471,6 +479,9 @@ impl Parser {
         let mut readme = None;
         let mut mods = Vec::new();
         let mut out_dir = None;
+        let mut depends = Vec::new();
+        let mut replaces = None;
+        let mut sign = None;
         loop {
             self.skip_newlines();
             if self.current() == &Token::Dedent {
@@ -488,13 +499,19 @@ impl Parser {
                 "out_dir" => out_dir = Some(self.expect_string()?),
                 "keywords" => keywords = self.parse_string_list()?,
                 "mods" => mods = self.parse_string_list()?,
+                "depends" => depends = self.parse_string_list()?,
+                "replaces" => replaces = Some(self.expect_string()?),
+                "sign" => sign = Some(self.expect_string()?),
                 other => return Err(self.fail(1004, format!("未知的 lib 字段: {other}"))),
             }
         }
-        let version = semver::Version::parse(&version.unwrap_or_else(|| "0.0.0".into()))
-            .map_err(|e| self.fail(1005, format!("版本号无效: {e}")))?;
+        let version_text = version.ok_or_else(|| self.fail(1005, "lib 缺少 version"))?;
+        let version = semver::Version::parse(&version_text).map_err(|e| self.fail(1005, format!("版本号无效: {e}")))?;
+        let name = name.ok_or_else(|| self.fail(1004, "lib 缺少 name"))?;
+        check_segment("包名", &name).map_err(|message| self.fail(1004, message))?;
+        check_segment("版本", &version.to_string()).map_err(|message| self.fail(1004, message))?;
         Ok(Statement::Lib(LibDefinition {
-            name: name.ok_or_else(|| self.fail(1004, "lib 缺少 name"))?,
+            name,
             version,
             desc: desc.unwrap_or_default(),
             repo: repo.unwrap_or_default(),
@@ -502,6 +519,9 @@ impl Parser {
             readme: readme.unwrap_or_default(),
             mods,
             out_dir: out_dir.unwrap_or_else(|| "output".into()),
+            depends,
+            replaces: replaces.unwrap_or_default(),
+            sign: sign.unwrap_or_default(),
         }))
     }
 
@@ -511,6 +531,7 @@ impl Parser {
         self.skip_newlines();
         self.expect(&Token::Indent)?;
         let mut name = None;
+        let mut dir = None;
         let mut capacity = None;
         let mut max_pkgs = None;
         loop {
@@ -523,15 +544,19 @@ impl Parser {
             self.expect(&Token::Colon)?;
             match field.as_str() {
                 "name" => name = Some(self.expect_string()?),
+                "dir" => dir = Some(self.expect_string()?),
                 "capacity" => capacity = Some(self.expect_number()? as u64),
                 "max_pkgs" => max_pkgs = Some(self.expect_number()? as u64),
                 other => return Err(self.fail(1004, format!("未知的 repo 字段: {other}"))),
             }
         }
+        let name = name.ok_or_else(|| self.fail(1004, "repo 缺少 name"))?;
+        check_segment("仓库名", &name).map_err(|message| self.fail(1004, message))?;
         Ok(Statement::Repo(RepoDefinition {
-            name: name.ok_or_else(|| self.fail(1004, "repo 缺少 name"))?,
-            capacity: capacity.unwrap_or(0),
-            max_pkgs: max_pkgs.unwrap_or(0),
+            name,
+            dir: dir.ok_or_else(|| self.fail(1004, "repo 缺少 dir"))?,
+            capacity,
+            max_pkgs,
         }))
     }
 
@@ -562,7 +587,21 @@ impl Parser {
         self.expect(&Token::Url)?;
         let name = self.parse_ident()?;
         let address = self.expect_string()?;
-        Ok(Statement::Url { name, address })
+        let mut cert = None;
+        let mut key = None;
+        while self.peek() == Some(&Token::Colon) {
+            let Some(field) = name_token(self.current()) else { break };
+            self.advance();
+            self.advance();
+            let value = self.parse_expr()?;
+            match field.as_str() {
+                "cert" if cert.is_none() => cert = Some(value),
+                "key" if key.is_none() => key = Some(value),
+                "cert" | "key" => return Err(self.fail(1004, format!("{field} 只能写一次"))),
+                _ => return Err(self.fail(1004, format!("url 没有 {field}"))),
+            }
+        }
+        Ok(Statement::Url { name, address, cert, key })
     }
 
     fn parse_dir(&mut self) -> Result<Statement, ParseError> {
@@ -588,22 +627,50 @@ impl Parser {
         Ok(Statement::Dir { name, path, suffix, deep, exclude })
     }
 
+    fn parse_share(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Share)?;
+        let name = self.parse_ident()?;
+        Ok(Statement::Share { name })
+    }
+
     fn parse_serve(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Serve)?;
+        let mut workers = None;
+        if name_token(self.current()).as_deref() == Some("workers") {
+            self.advance();
+            self.expect(&Token::Colon)?;
+            workers = Some(self.parse_expr()?);
+        }
         self.expect(&Token::Colon)?;
-        let body = self.parse_block_body(true)?;
+        self.skip_newlines();
+        self.expect(&Token::Indent)?;
         let mut routes = Vec::new();
-        for stmt in body {
-            match stmt {
-                Statement::At { .. } => {}
-                Statement::Route(route) => routes.push(route),
-                _ => return Err(self.fail(1001, "serve 里只能写 route")),
+        let mut repo = None;
+        loop {
+            self.skip_newlines();
+            if self.current() == &Token::Dedent {
+                self.advance();
+                break;
+            }
+            match self.current() {
+                Token::Route => routes.push(match self.parse_route_stmt()? {
+                    Statement::Route(route) => route,
+                    _ => unreachable!(),
+                }),
+                Token::Repo => {
+                    self.advance();
+                    if repo.is_some() {
+                        return Err(self.fail(1001, "serve 里只能写一个 repo"));
+                    }
+                    repo = Some(self.parse_ident()?);
+                }
+                _ => return Err(self.fail(1001, "serve 里只能写 route 或 repo 地址名")),
             }
         }
-        if routes.is_empty() {
+        if routes.is_empty() && repo.is_none() {
             return Err(self.fail(1001, "serve 至少要有一条 route"));
         }
-        Ok(Statement::Serve { routes })
+        Ok(Statement::Serve { workers, routes, repo })
     }
 
     fn parse_route_stmt(&mut self) -> Result<Statement, ParseError> {
@@ -889,6 +956,14 @@ impl Parser {
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
+            Token::Repo if self.peek() == Some(&Token::Dot) => {
+                let path = self.parse_path()?;
+                if self.current() != &Token::LParen {
+                    return Ok(Expr::Name(path));
+                }
+                let args = self.parse_arg_list()?;
+                Ok(Expr::Call { path, args })
+            }
             Token::LBracket => {
                 self.advance();
                 let mut items = Vec::new();
@@ -1048,6 +1123,13 @@ impl Parser {
     fn is_at_end(&self) -> bool {
         self.position >= self.tokens.len()
     }
+}
+
+fn check_segment(kind: &str, text: &str) -> Result<(), String> {
+    if text.is_empty() || text == "." || text == ".." || text.contains('/') || text.contains('\\') || text.contains('\0') {
+        return Err(format!("{kind}不能作为路径段: {text}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

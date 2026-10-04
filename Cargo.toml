@@ -1,6 +1,6 @@
 [package]
 name = "dake"
-version = "0.6.0"
+version = "0.7.0"
 edition = "2021"
 
 [dependencies]
@@ -10,6 +10,7 @@ clap = { version = "4.5.48", features = ["derive"] }
 # Local crates
 error = { path = "src/crates/error" }
 regex = "1.12.1"
+ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 rustls-native-certs = "0.8"
 rustls-pemfile = "2"

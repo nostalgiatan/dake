@@ -57,7 +57,7 @@ pub enum Statement {
     Print(Expr),
     Doing(NamePath),
     Await(Vec<NamePath>),
-    Url { name: String, address: String },
+    Url { name: String, address: String, cert: Option<Expr>, key: Option<Expr> },
     Dir {
         name: String,
         path: String,
@@ -65,7 +65,8 @@ pub enum Statement {
         deep: Option<Expr>,
         exclude: Option<Expr>,
     },
-    Serve { routes: Vec<RouteDecl> },
+    Share { name: String },
+    Serve { workers: Option<Expr>, routes: Vec<RouteDecl>, repo: Option<String> },
     Route(RouteDecl),
     Catch {
         error_name: Option<String>,
@@ -104,13 +105,17 @@ pub struct LibDefinition {
     pub readme: String,
     pub mods: Vec<String>,
     pub out_dir: String,
+    pub depends: Vec<String>,
+    pub replaces: String,
+    pub sign: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RepoDefinition {
     pub name: String,
-    pub capacity: u64,
-    pub max_pkgs: u64,
+    pub dir: String,
+    pub capacity: Option<u64>,
+    pub max_pkgs: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -178,6 +183,8 @@ pub enum LayoutKind {
     Split,
     Json,
     Width,
+    /// 每个字段一块：4 字节小端长度，然后是这一块的内容。
+    Block,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

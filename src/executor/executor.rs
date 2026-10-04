@@ -51,6 +51,16 @@ impl fmt::Display for ExecutionError {
 
 impl std::error::Error for ExecutionError {}
 
+impl ExecutionError {
+    pub(in crate::executor) fn code(&self) -> u32 {
+        self.info.error_code()
+    }
+
+    pub(in crate::executor) fn explain(&self) -> String {
+        self.info.error_message().to_string()
+    }
+}
+
 pub struct Executor {
     pub(in crate::executor) context: ExecutionContext,
     slots: HashMap<String, Value>,
@@ -59,7 +69,8 @@ pub struct Executor {
     pub(in crate::executor) structs: Arc<HashMap<String, crate::dsl::ir::StructIr>>,
     pub(in crate::executor) output_buffer: Vec<String>,
     lib: Option<LibDefinition>,
-    repo: Option<RepoDefinition>,
+    pub(in crate::executor) repo: Option<RepoDefinition>,
+    pub(in crate::executor) repo_lock: Arc<Mutex<()>>,
     pub(in crate::executor) package_files: Vec<String>,
     pub(in crate::executor) packed: Vec<package::PackedFile>,
     pub(in crate::executor) crypto: Option<CryptoOperations>,
@@ -74,8 +85,10 @@ pub struct Executor {
     stop_each: bool,
     pub(in crate::executor) halt: bool,
     pub(in crate::executor) serve_depth: u32,
-    pub(in crate::executor) serve_urls: HashMap<String, String>,
+    pub(in crate::executor) serve_urls: HashMap<String, crate::executor::serve::ServeUrl>,
+    pub(in crate::executor) depot_url: Option<String>,
     pub(in crate::executor) serve_dirs: HashMap<String, crate::executor::serve::DirSource>,
+    pub(in crate::executor) shared: Arc<Mutex<HashMap<String, Value>>>,
     source_file: String,
     line: u32,
     column: u32,
@@ -93,6 +106,7 @@ impl Executor {
             output_buffer: Vec::new(),
             lib: None,
             repo: None,
+            repo_lock: Arc::new(Mutex::new(())),
             package_files: Vec::new(),
             packed: Vec::new(),
             crypto: None,
@@ -108,7 +122,9 @@ impl Executor {
             halt: false,
             serve_depth: 0,
             serve_urls: HashMap::new(),
+            depot_url: None,
             serve_dirs: HashMap::new(),
+            shared: Arc::new(Mutex::new(HashMap::new())),
             source_file: String::new(),
             line: 0,
             column: 0,
@@ -332,8 +348,12 @@ impl Executor {
                 println!("{text}");
                 self.output_buffer.push(text);
             }
-            Inst::Url { name, address } => {
-                self.serve_urls.insert(name.clone(), address.clone());
+            Inst::Url { name, address, cert, key } => {
+                self.serve_urls.insert(name.clone(), crate::executor::serve::ServeUrl {
+                    address: address.clone(),
+                    cert: cert.clone(),
+                    key: key.clone(),
+                });
             }
             Inst::Dir { name, path, suffix, deep, exclude } => {
                 self.serve_dirs.insert(name.clone(), crate::executor::serve::DirSource {
@@ -343,7 +363,11 @@ impl Executor {
                     exclude: exclude.clone(),
                 });
             }
-            Inst::Serve { routes } => super::serve::run(self, routes)?,
+            Inst::Share { name } => {
+                let value = self.get(name)?;
+                self.shared.lock().expect("共享锁").insert(name.clone(), value);
+            }
+            Inst::Serve { workers, routes, repo } => super::serve::run(self, routes, *workers, repo.clone())?,
             Inst::Package => self.materialize()?,
         }
         Ok(())
@@ -354,6 +378,37 @@ impl Executor {
             ExecutionError::new(4005, format!("未找到行为或管道: {path}"))
         })?;
         self.invoke(&action, &[])
+    }
+
+    pub(in crate::executor) fn fork(&self) -> Executor {
+        let mut worker = Executor::new();
+        worker.context = self.context.clone();
+        worker.actions = Arc::clone(&self.actions);
+        worker.errors = Arc::clone(&self.errors);
+        worker.structs = Arc::clone(&self.structs);
+        worker.lib = self.lib.clone();
+        worker.repo = self.repo.clone();
+        worker.repo_lock = Arc::clone(&self.repo_lock);
+        worker.crypto = self.crypto.clone();
+        worker.regex_cache = self.regex_cache.clone();
+        worker.validator = Validator::with_cache(self.regex_cache.clone());
+        worker.log_dir = self.log_dir.clone();
+        worker.log_print = self.log_print;
+        worker.net_current = self.net_current.clone();
+        worker.net_named = self.net_named.clone();
+        worker.source_file = self.source_file.clone();
+        worker.shared = Arc::clone(&self.shared);
+        worker.depot_url = self.depot_url.clone();
+        worker
+    }
+
+    pub(in crate::executor) fn absorb(&mut self, worker: Executor) {
+        self.output_buffer.extend(worker.output_buffer);
+        self.package_files.extend(worker.package_files);
+        self.packed.extend(worker.packed);
+        if worker.halt {
+            self.halt = true;
+        }
     }
 
     fn await_paths(&mut self, paths: &[ResolvedPath]) -> Result<(), ExecutionError> {
@@ -380,6 +435,7 @@ impl Executor {
         let crypto = self.crypto.clone();
         let log_dir = self.log_dir.clone();
         let log_print = self.log_print;
+        let shared_map = Arc::clone(&self.shared);
         let outputs = Arc::new(Mutex::new(Vec::<String>::new()));
         let errors = Arc::new(Mutex::new(Vec::<String>::new()));
         let merged = Arc::new(Mutex::new(Vec::<(Vec<(String, Value)>, Vec<String>, Vec<package::PackedFile>)>::new()));
@@ -397,6 +453,7 @@ impl Executor {
                 let net_named = net_named.clone();
                 let crypto = crypto.clone();
                 let log_dir = log_dir.clone();
+                let shared_map = Arc::clone(&shared_map);
                 tasks.push(smol::unblock(move || {
                     let mut worker = Executor::new();
                     worker.context = context;
@@ -408,6 +465,7 @@ impl Executor {
                     worker.crypto = crypto;
                     worker.log_dir = log_dir;
                     worker.log_print = log_print;
+                    worker.shared = Arc::clone(&shared_map);
                     match worker.invoke(&action, &[]) {
                         Ok(()) => {
                             for line in &worker.output_buffer {
@@ -460,12 +518,45 @@ impl Executor {
         self.get("result").map_err(|_| ExecutionError::new(4011, format!("行为 {name} 没有 set(result)")))
     }
 
+    pub(in crate::executor) fn call_named_drop_many(&mut self, file: &str, name: &str, args: Vec<Value>) -> Result<(), ExecutionError> {
+        let path = ResolvedPath::User { file: std::path::PathBuf::from(file), name: name.to_string() };
+        let action = self.actions.get(&path).cloned().ok_or_else(|| {
+            ExecutionError::new(4005, format!("未找到行为: {name}"))
+        })?;
+        self.slots.remove("result");
+        self.context.local_vars_remove("result");
+        let temps: Vec<_> = (0..args.len()).map(|index| format!("#field{index}")).collect();
+        for (temp, value) in temps.iter().zip(args) {
+            self.put(temp, value);
+        }
+        let call_args: Vec<_> = temps.iter().map(|temp| CallArg { name: None, temp: temp.clone() }).collect();
+        self.invoke(&action, &call_args)?;
+        for temp in &temps {
+            self.slots.remove(temp);
+        }
+        self.slots.remove("result");
+        self.context.local_vars_remove("result");
+        Ok(())
+    }
+
+    pub(in crate::executor) fn call_named_drop(&mut self, file: &str, name: &str, arg: Value) -> Result<(), ExecutionError> {
+        self.call_named_drop_many(file, name, vec![arg])
+    }
+
+    pub(in crate::executor) fn param_count(&self, path: &ResolvedPath) -> Result<usize, ExecutionError> {
+        self.actions.get(path).map(|action| action.params.len()).ok_or_else(|| {
+            ExecutionError::new(4005, format!("未找到行为: {path}"))
+        })
+    }
+
     pub(in crate::executor) fn call_action(&mut self, path: &ResolvedPath, args: Vec<Value>) -> Result<Value, ExecutionError> {
         let action = self.actions.get(path).cloned().ok_or_else(|| {
             ExecutionError::new(4005, format!("未找到行为: {path}"))
         })?;
-        self.slots.remove("result");
-        self.context.local_vars_remove("result");
+        for name in ["result", "status", "headers"] {
+            self.slots.remove(name);
+            self.context.local_vars_remove(name);
+        }
         let temps: Vec<_> = (0..args.len()).map(|index| format!("#serve{index}")).collect();
         for (temp, value) in temps.iter().zip(args) {
             self.put(temp, value);
@@ -480,6 +571,39 @@ impl Executor {
             ResolvedPath::Builtin(name) => name.as_str(),
         };
         self.get("result").map_err(|_| ExecutionError::new(4011, format!("行为 {name} 没有 set(result)")))
+    }
+
+    pub(in crate::executor) fn take_http_meta(&mut self) -> Result<(u16, Vec<(String, String)>), ExecutionError> {
+        let status = match self.slots.get("status") {
+            None => 200,
+            Some(Value::Number(code)) if *code >= 100 && *code < 600 => *code as u16,
+            Some(_) => return Err(ExecutionError::new(4034, "status 需要 100 到 599 的整数".into())),
+        };
+        let headers = match self.slots.get("headers") {
+            None => Vec::new(),
+            Some(Value::Object(fields)) => {
+                let mut out = Vec::new();
+                for (name, value) in fields.iter() {
+                    if name.is_empty() || name.bytes().any(|byte| byte == b'\r' || byte == b'\n' || byte == b':') {
+                        return Err(ExecutionError::new(4034, format!("响应头名字不合法: {name}")));
+                    }
+                    let Value::String(text) = value else {
+                        return Err(ExecutionError::new(4034, "响应头的值需要字符串".into()));
+                    };
+                    if text.bytes().any(|byte| byte == b'\r' || byte == b'\n') {
+                        return Err(ExecutionError::new(4034, format!("响应头 {name} 的值不合法")));
+                    }
+                    out.push((name.clone(), text.clone()));
+                }
+                out
+            }
+            Some(_) => return Err(ExecutionError::new(4034, "headers 需要对象".into())),
+        };
+        for name in ["status", "headers"] {
+            self.slots.remove(name);
+            self.context.local_vars_remove(name);
+        }
+        Ok((status, headers))
     }
 
     fn invoke(&mut self, action: &ActionIr, args: &[CallArg]) -> Result<(), ExecutionError> {
@@ -529,6 +653,13 @@ impl Executor {
     }
 
     fn materialize(&mut self) -> Result<(), ExecutionError> {
+        if let (Some(lib), Some(repo)) = (&self.lib, &self.repo) {
+            if lib.repo.is_empty() {
+                self.lib.as_mut().unwrap().repo = repo.name.clone();
+            } else if lib.repo != repo.name {
+                return Err(ExecutionError::new(4012, format!("lib 的 repo 是 {}，仓库名是 {}", lib.repo, repo.name)));
+            }
+        }
         let Some(lib) = self.lib.clone() else {
             return Ok(());
         };
@@ -544,6 +675,10 @@ impl Executor {
             "数据包已写入 {out}，文件 {} 个",
             self.package_files.len() + self.packed.len()
         ));
+        if let Some(repo) = self.repo.clone() {
+            let dest = super::store::admit(&self.repo_lock, &repo.dir, &out, repo.capacity, repo.max_pkgs)?;
+            self.output_buffer.push(format!("已放入仓库 {dest}"));
+        }
         Ok(())
     }
 
@@ -563,6 +698,10 @@ impl Executor {
     }
 
     fn put(&mut self, name: &str, value: Value) {
+        if self.shared.lock().expect("共享锁").contains_key(name) {
+            self.shared.lock().expect("共享锁").insert(name.to_string(), value);
+            return;
+        }
         if name.starts_with('#') {
             self.slots.insert(name.to_string(), value);
             return;
@@ -572,6 +711,9 @@ impl Executor {
     }
 
     pub(in crate::executor) fn get(&self, name: &str) -> Result<Value, ExecutionError> {
+        if let Some(value) = self.shared.lock().expect("共享锁").get(name) {
+            return Ok(value.clone());
+        }
         self.slots.get(name).cloned().or_else(|| self.context.get(name)).ok_or_else(|| {
             ExecutionError::new(4006, format!("变量未定义: {name}"))
         })

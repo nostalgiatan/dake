@@ -12,3 +12,4 @@
 - [把旧包读成新结构](read-old-package.md)
 - [从网络读入一条记录](fetch-record.md)
 - [让一个地址和目录持续分发](serve-routes.md)
+- [把仓库挂到已有地址](serve-repo.md)

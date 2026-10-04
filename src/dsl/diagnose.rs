@@ -10,6 +10,33 @@ pub fn hint(code: u32, message: &str) -> String {
     if message.contains("缺少 from") || message.contains("缺少 layout") {
         return "结构里补上 from: str 或 from: bytes，以及 layout".into();
     }
+    if message.contains("status 需要") {
+        return "set(status, 100 到 599 的整数)。省略时这一次响应是 200".into();
+    }
+    if message.contains("headers 需要对象") || message.contains("响应头") {
+        return "set(headers, object(\"名字\", \"值\"))。值必须是字符串，名字里不要写冒号或换行".into();
+    }
+    if message.contains("缺少 version") {
+        return "lib 写上 version: \"1.0.0\" 这种语义化版本".into();
+    }
+    if message.contains("缺少 dir") {
+        return "repo 写上 dir，指向本机存放包的目录".into();
+    }
+    if message.contains("密钥文件已存在") {
+        return "换一个还不存在的路径。已有的私钥和公钥不会被覆盖".into();
+    }
+    if message.contains("已存在") {
+        return "换一个版本，或使用仓库里已有的那一版。已有的包不会被覆盖".into();
+    }
+    if message.contains("先提交清单") {
+        return "先 PUT /dake/v1/名字/版本/manifest，再上传文件".into();
+    }
+    if message.contains("超过上限") || message.contains("超过容量") {
+        return "提高 repo 的 max_pkgs 或 capacity，或换一个仓库目录".into();
+    }
+    if message.contains("同一个文件") {
+        return "crypto.pair 的私钥和公钥写成两个不同的路径".into();
+    }
     if message.contains("参数") {
         return "按声明补齐参数；行为要 set(result, 值) 才有返回值".into();
     }
@@ -71,6 +98,7 @@ pub fn hint(code: u32, message: &str) -> String {
         1013 | 1014 | 1017 => "这里需要名字、字符串、数字或 ${变量}。语句关键字只在行首生效",
         3001 => "路径不要包含 ..。包内名字不要包含斜杠",
         3002 => "确认文件已经存在。unpack 指向包目录里的文件名",
+        3003 => "密钥文件已存在就换路径。写入失败时确认父目录可写",
         4010 => "字节用 base64 或 utf8 转换。记录和对象用字段读取，不用 str 或 num",
         4011 => "补齐参数个数。list.map 和 list.keep 的行为只能有一个参数",
         4012 => "看清这一项是字符串、整数、小数、字节、列表、记录还是对象",
@@ -79,11 +107,24 @@ pub fn hint(code: u32, message: &str) -> String {
         4031 => "检查地址、端口和 timeout",
         4032 => "补上成对的 cert 和 key，或把 ca 指到签发该服务的证书",
         4033 => "按状态码检查路径和请求体",
-        4034 => "请求头字段改成字符串，timeout 写成正整数",
+        4034 => "请求头和响应头的值写成字符串。status 写成 100 到 599 的整数。timeout 写成正整数",
         4035 => "确认监听地址、端口和目录都可用",
         4036 => "路由路径以 / 开头，并写在对应的 url 或 dir 名字上",
         4037 => "补上缺失的文件或目录，或修正读取、写入和列出的权限",
         _ => "对照语言参考里同一条语句或行为的写法修改这一处",
     };
     text.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hint;
+
+    #[test]
+    fn reply_and_key_hints_name_the_repair() {
+        assert!(hint(4034, "status 需要 100 到 599 的整数").contains("100 到 599"));
+        assert!(hint(4034, "headers 需要对象").contains("object"));
+        assert!(hint(3003, "密钥文件已存在").contains("不会被覆盖"));
+        assert!(hint(3003, "私钥和公钥不能是同一个文件").contains("两个不同的路径"));
+    }
 }

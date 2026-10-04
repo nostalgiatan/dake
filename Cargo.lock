@@ -459,7 +459,7 @@ dependencies = [
 
 [[package]]
 name = "dake"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -469,6 +469,7 @@ dependencies = [
  "notify",
  "rcgen",
  "regex",
+ "ring",
  "rustls",
  "rustls-native-certs",
  "rustls-pemfile",

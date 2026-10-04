@@ -1,7 +1,7 @@
 use super::builtin::{content_type_for, decode_body, encode_body};
 use super::executor::{ExecutionError, Executor};
 use crate::dsl::ast::Value;
-use crate::dsl::ir::CallArg;
+use crate::dsl::ir::{CallArg, ResolvedPath};
 use rustls::pki_types::{ServerName, CertificateDer, PrivateKeyDer};
 use rustls::{ClientConfig, RootCertStore};
 use std::io::{Read, Write};
@@ -61,7 +61,7 @@ pub(super) fn get(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionE
 }
 
 pub(super) fn accept(exec: &mut Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
-    if args.len() != 4 {
+    if args.iter().filter(|arg| arg.name.is_none()).count() != 4 {
         return Err(ExecutionError::new(4011, "net.accept 需要地址、结构和行为".into()));
     }
     let address = exec.arg_string(args, 0)?;
@@ -70,22 +70,58 @@ pub(super) fn accept(exec: &mut Executor, args: &[CallArg]) -> Result<Value, Exe
     let action = exec.arg_string(args, 3)?;
     let (host, port) = listen_addr(&address)?;
     let listener = TcpListener::bind(format!("{host}:{port}")).map_err(|err| ExecutionError::new(4031, format!("监听 {address} 失败: {err}")))?;
+    let cert = named(args, "cert").map(|arg| exec.arg_value_string(&arg.temp)).transpose()?;
+    let key = named(args, "key").map(|arg| exec.arg_value_string(&arg.temp)).transpose()?;
+    let tls = match (cert, key) {
+        (Some(cert), Some(key)) => Some(super::serve::server_config(&super::paths::safe_path(&cert)?, &super::paths::safe_path(&key)?)?),
+        (None, None) => None,
+        _ => return Err(ExecutionError::new(4032, "cert 与 key 必须同时给出".into())),
+    };
     let (mut stream, _) = listener.accept().map_err(|err| ExecutionError::new(4031, format!("接受连接失败: {err}")))?;
     stream.set_read_timeout(Some(Duration::from_secs(30))).map_err(|err| ExecutionError::new(4031, err.to_string()))?;
     stream.set_write_timeout(Some(Duration::from_secs(30))).map_err(|err| ExecutionError::new(4031, err.to_string()))?;
-    let raw = read_raw(&mut stream)?;
+    if let Some(config) = tls {
+        let mut session = rustls::ServerConnection::new(config).map_err(|err| ExecutionError::new(4032, err.to_string()))?;
+        let mut tls_stream = rustls::Stream::new(&mut session, &mut stream);
+        return finish_accept(exec, &struct_id, &file, &action, &mut tls_stream);
+    }
+    finish_accept(exec, &struct_id, &file, &action, &mut stream)
+}
+
+fn finish_accept(exec: &mut Executor, struct_id: &str, file: &str, action: &str, stream: &mut (impl Read + Write)) -> Result<Value, ExecutionError> {
+    let raw = read_raw(stream)?;
     let header_end = raw.windows(4).position(|window| window == b"\r\n\r\n").ok_or_else(|| ExecutionError::new(4031, "请求不是 HTTP".into()))?;
+    let head = String::from_utf8_lossy(&raw[..header_end]);
     let body = raw[header_end + 4..].to_vec();
-    let record = decode_body(exec, &struct_id, body)?;
-    let reply = exec.call_named(&file, &action, record)?;
+    let record = decode_body(exec, struct_id, body)?;
+    let headers = header_object(&head);
+    let path = ResolvedPath::User { file: std::path::PathBuf::from(file), name: action.to_string() };
+    let mut values = vec![record];
+    if exec.param_count(&path)? == 2 {
+        values.push(headers);
+    }
+    let reply = exec.call_action(&path, values)?;
+    let (status, extra) = exec.take_http_meta()?;
     let (payload, content_type) = match &reply {
         Value::Bytes(bytes) => (Arc::unwrap_or_clone(bytes.clone()), "application/octet-stream".to_string()),
         Value::Record { path, fields } => (encode_body(exec, path, fields.as_slice())?, content_type_for(exec, path)?.to_string()),
         _ => return Err(ExecutionError::new(4034, "响应需要记录或字节".into())),
     };
-    let head = format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", payload.len());
-    write_all(&mut stream, head.as_bytes(), &payload)?;
+    super::serve::reply(stream, status, &payload, &content_type, &extra)?;
     Ok(reply)
+}
+
+pub(super) fn header_object(head: &str) -> Value {
+    let mut fields = Vec::new();
+    for line in head.lines().skip(1) {
+        let Some((name, value)) = line.split_once(':') else { continue };
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        fields.push((name.to_string(), Value::String(value.trim().to_string())));
+    }
+    Value::Object(Arc::new(fields))
 }
 
 pub(super) fn listen_addr(address: &str) -> Result<(String, u16), ExecutionError> {
@@ -189,14 +225,14 @@ fn join_url(base: &str, path: &str) -> Result<String, ExecutionError> {
     Ok(format!("{}://{}:{}{joined}", parts.scheme, parts.host, parts.port))
 }
 
-struct Parts {
+pub(super) struct Parts {
     scheme: String,
     host: String,
     port: u16,
     path: String,
 }
 
-fn parse_url(raw: &str) -> Result<Parts, ExecutionError> {
+pub(super) fn parse_url(raw: &str) -> Result<Parts, ExecutionError> {
     let (scheme, rest) = if let Some(rest) = raw.strip_prefix("https://") {
         ("https", rest)
     } else if let Some(rest) = raw.strip_prefix("http://") {
@@ -331,7 +367,7 @@ fn write_all(stream: &mut impl Write, head: &[u8], body: &[u8]) -> Result<(), Ex
 
 pub(super) fn read_raw(stream: &mut impl Read) -> Result<Vec<u8>, ExecutionError> {
     let mut raw = Vec::new();
-    let mut buf = [0u8; 4096];
+    let mut buf = vec![0u8; 1024 * 1024];
     loop {
         if response_complete(&raw) {
             break;
@@ -411,7 +447,7 @@ fn read_response(stream: &mut impl Read) -> Result<Vec<u8>, ExecutionError> {
     Ok(body)
 }
 
-fn tls_config(target: &Target) -> Result<ClientConfig, ExecutionError> {
+pub(super) fn tls_config(target: &Target) -> Result<ClientConfig, ExecutionError> {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let mut roots = RootCertStore::empty();
     if let Some(path) = &target.ca {
@@ -449,5 +485,91 @@ fn tls_config(target: &Target) -> Result<ClientConfig, ExecutionError> {
         }
         (None, None) => Ok(builder.with_no_client_auth()),
         _ => Err(ExecutionError::new(4032, "cert 与 key 必须同时给出".into())),
+    }
+}
+
+pub(super) fn http_call(exec: &Executor, method: &str, url: &str, upload: Option<&str>, save: Option<&str>) -> Result<(u16, String), ExecutionError> {
+    let target = exec.net_current.clone().unwrap_or_else(default_target);
+    let parts = parse_url(url)?;
+    let timeout = Duration::from_secs(if target.timeout == 0 { 30 } else { target.timeout });
+    let socket = format!("{}:{}", parts.host, parts.port);
+    let addr = socket.to_socket_addrs().map_err(|err| ExecutionError::new(4031, format!("{socket}: {err}")))?.next()
+        .ok_or_else(|| ExecutionError::new(4031, format!("无法解析 {socket}")))?;
+    let mut tcp = TcpStream::connect_timeout(&addr, timeout).map_err(|err| ExecutionError::new(4031, format!("连接 {socket} 失败: {err}")))?;
+    tcp.set_read_timeout(Some(timeout)).map_err(|err| ExecutionError::new(4031, err.to_string()))?;
+    tcp.set_write_timeout(Some(timeout)).map_err(|err| ExecutionError::new(4031, err.to_string()))?;
+    let length = match upload {
+        Some(path) => std::fs::metadata(path).map_err(|err| ExecutionError::new(3002, err.to_string()))?.len(),
+        None => 0,
+    };
+    let request = format!("{method} {} HTTP/1.1\r\nHost: {}:{}\r\nConnection: close\r\nContent-Length: {length}\r\n\r\n", parts.path, parts.host, parts.port);
+    if parts.scheme == "https" {
+        let config = tls_config(&target)?;
+        let name = ServerName::try_from(parts.host.clone()).map_err(|_| ExecutionError::new(4032, format!("主机名无效: {}", parts.host)))?;
+        let mut tls = rustls::ClientConnection::new(Arc::new(config), name).map_err(|err| ExecutionError::new(4032, err.to_string()))?;
+        let mut tls_stream = rustls::Stream::new(&mut tls, &mut tcp);
+        send_and_read(&mut tls_stream, request.as_bytes(), upload, length, save)
+    } else {
+        send_and_read(&mut tcp, request.as_bytes(), upload, length, save)
+    }
+}
+
+fn send_and_read(stream: &mut (impl Read + Write), head: &[u8], upload: Option<&str>, length: u64, save: Option<&str>) -> Result<(u16, String), ExecutionError> {
+    stream.write_all(head).map_err(|err| ExecutionError::new(4031, err.to_string()))?;
+    if let Some(path) = upload {
+        let mut file = std::fs::File::open(path).map_err(|err| ExecutionError::new(3002, err.to_string()))?;
+        let mut left = length;
+        let mut buf = vec![0u8; 1024 * 1024];
+        while left > 0 {
+            let n = file.read(&mut buf).map_err(|err| ExecutionError::new(3002, err.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            stream.write_all(&buf[..n]).map_err(|err| ExecutionError::new(4031, err.to_string()))?;
+            left -= n as u64;
+        }
+    }
+    stream.flush().map_err(|err| ExecutionError::new(4031, err.to_string()))?;
+    let (status, head, rest) = read_status(stream)?;
+    let size = head.lines().find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case("content-length").then(|| value.trim().parse::<u64>().ok())?
+    }).unwrap_or(0);
+    if let Some(path) = save {
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            std::fs::create_dir_all(parent).map_err(|err| ExecutionError::new(3003, err.to_string()))?;
+        }
+        let mut chained = std::io::Cursor::new(rest).chain(stream);
+        super::store::write_stream(path, &mut chained, size)?;
+        Ok((status, String::new()))
+    } else {
+        let mut body = rest;
+        let mut buf = vec![0u8; 8192];
+        while (body.len() as u64) < size {
+            let n = stream.read(&mut buf).map_err(|err| ExecutionError::new(4031, err.to_string()))?;
+            if n == 0 {
+                break;
+            }
+            body.extend_from_slice(&buf[..n]);
+        }
+        body.truncate(size as usize);
+        Ok((status, String::from_utf8_lossy(&body).into_owned()))
+    }
+}
+
+fn read_status(stream: &mut impl Read) -> Result<(u16, String, Vec<u8>), ExecutionError> {
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        if let Some(index) = raw.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&raw[..index]).into_owned();
+            let status = head.lines().next().unwrap_or("").split_whitespace().nth(1).unwrap_or("0").parse::<u16>().unwrap_or(0);
+            return Ok((status, head, raw[index + 4..].to_vec()));
+        }
+        match stream.read(&mut buf) {
+            Ok(0) => return Err(ExecutionError::new(4031, "响应不是 HTTP".into())),
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            Err(err) => return Err(ExecutionError::new(4031, err.to_string())),
+        }
     }
 }

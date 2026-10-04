@@ -58,9 +58,15 @@ pub(super) fn dispatch(exec: &mut Executor, name: &str, args: &[CallArg]) -> Res
         }
         "files.read" => read_record(exec, args),
         "files.rows" => read_rows(exec, args),
+        "files.each" => files_each(exec, args),
+        "files.field" => files_field(exec, args),
+        "files.verify" => files_verify(exec, args),
+        "files.seal" => files_seal(exec, args),
+        "files.unseal" => files_unseal(exec, args),
         "files.list" => files_list(exec, args),
         "files.write" => write_record(exec, args),
         "files.write.rows" => write_rows(exec, args),
+        "files.write.row" => write_row(exec, args),
         "pack" => pack_rows(exec, args),
         "unpack" => unpack_rows(exec, args),
         "net.url" => super::net::set_url(exec, args),
@@ -68,6 +74,8 @@ pub(super) fn dispatch(exec: &mut Executor, name: &str, args: &[CallArg]) -> Res
         "net.post" => super::net::post(exec, args),
         "net.accept" => super::net::accept(exec, args),
         "update" => update_record(exec, args),
+        "shared.add" => shared_add(exec, args),
+        "shared.set" => shared_set(exec, args),
         "text.lines" => text_lines(exec, args),
         "text.join" => text_join(exec, args),
         "text.decode" => text_decode(exec, args),
@@ -115,6 +123,11 @@ pub(super) fn dispatch(exec: &mut Executor, name: &str, args: &[CallArg]) -> Res
             Ok(Value::Bool(true))
         }
         "sys.host" | "sys.cpu" | "sys.mem" | "sys.disk" | "sys.disks" => super::host::call(exec, name, args),
+        "crypto.pair" => crypto_pair(exec, args),
+        "repo.put" => repo_put(exec, args),
+        "repo.get" => repo_get(exec, args),
+        "repo.fetch" => repo_fetch(exec, args),
+        "repo.push" => repo_push(exec, args),
         "cmd" => {
             let cmd = exec.arg_string(args, 0)?;
             let mut cmd_args = Vec::new();
@@ -307,8 +320,7 @@ fn read_record(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionErro
     let path = safe_path(&exec.arg_string(args, 0)?)?;
     super::access::probe_read(&path)?;
     let id = exec.arg_string(args, 1)?;
-    let bytes = std::fs::read(&path).map_err(|e| ExecutionError::new(3002, format!("{path}: {e}")))?;
-    decode_body(exec, &id, bytes)
+    decode_block_file(exec, &id, &path)
 }
 
 pub(super) fn decode_body(exec: &Executor, id: &str, bytes: Vec<u8>) -> Result<Value, ExecutionError> {
@@ -352,6 +364,7 @@ pub(super) fn decode_body(exec: &Executor, id: &str, bytes: Vec<u8>) -> Result<V
         (Carrier::Str, LayoutKind::Width) => {
             return Err(ExecutionError::new(4018, "width 只适用于字节".into()));
         }
+        (_, LayoutKind::Block) => decode_block(def, &bytes)?,
     };
     finish_record(exec, id, fields)
 }
@@ -380,6 +393,7 @@ pub(super) fn encode_body(exec: &Executor, id: &str, fields: &[(String, Value)])
         (_, LayoutKind::Split) => Ok(encode_fields(def, fields)?.into_bytes()),
         (_, LayoutKind::Json) => Ok(encode_json(exec, def, fields)?.into_bytes()),
         (_, LayoutKind::Width) => encode_width(def, fields),
+        (_, LayoutKind::Block) => encode_block(def, fields),
     }
 }
 
@@ -387,7 +401,7 @@ pub(super) fn content_type_for(exec: &Executor, id: &str) -> Result<&'static str
     let def = exec.structs.get(id).ok_or_else(|| ExecutionError::new(4018, format!("找不到结构 {id}")))?;
     Ok(match (&def.from, &def.layout) {
         (_, LayoutKind::Json) => "application/json",
-        (Carrier::Bytes, _) | (_, LayoutKind::Width) => "application/octet-stream",
+        (Carrier::Bytes, _) | (_, LayoutKind::Width) | (_, LayoutKind::Block) => "application/octet-stream",
         _ => "text/plain; charset=utf-8",
     })
 }
@@ -651,6 +665,51 @@ fn files_list(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError
     Ok(Value::List(Arc::new(found.into_iter().map(Value::String).collect())))
 }
 
+fn shared_add(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    need(args, 2)?;
+    let name = exec.arg_string(args, 0)?;
+    let delta = match exec.get(&args[1].temp)? {
+        Value::Number(n) => n,
+        _ => return Err(ExecutionError::new(4012, "shared.add 需要整数".into())),
+    };
+    let mut map = exec.shared.lock().expect("共享锁");
+    let slot = map.get_mut(&name).ok_or_else(|| ExecutionError::new(4006, format!("变量未共享: {name}")))?;
+    let Value::Number(current) = slot else {
+        return Err(ExecutionError::new(4012, "shared.add 需要整数".into()));
+    };
+    let next = current.checked_add(delta).ok_or_else(|| ExecutionError::new(4012, "整数溢出".into()))?;
+    *slot = Value::Number(next);
+    Ok(Value::Number(next))
+}
+
+fn shared_set(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    need(args, 3)?;
+    let name = exec.arg_string(args, 0)?;
+    let field = exec.arg_string(args, 1)?;
+    let value = exec.get(&args[2].temp)?;
+    let mut map = exec.shared.lock().expect("共享锁");
+    let slot = map.get_mut(&name).ok_or_else(|| ExecutionError::new(4006, format!("变量未共享: {name}")))?;
+    match slot {
+        Value::Record { fields, .. } => {
+            let fields = Arc::make_mut(fields);
+            let item = fields.iter_mut().find(|(key, _)| key == &field).ok_or_else(|| {
+                ExecutionError::new(4017, format!("记录没有字段 {field}"))
+            })?;
+            item.1 = value;
+        }
+        Value::Object(fields) => {
+            let fields = Arc::make_mut(fields);
+            if let Some(item) = fields.iter_mut().find(|(key, _)| key == &field) {
+                item.1 = value;
+            } else {
+                fields.push((field, value));
+            }
+        }
+        _ => return Err(ExecutionError::new(4012, "shared.set 需要记录或对象".into())),
+    }
+    Ok(slot.clone())
+}
+
 fn named_arg<'a>(args: &'a [CallArg], name: &str) -> Option<&'a CallArg> {
     args.iter().find(|arg| arg.name.as_deref() == Some(name))
 }
@@ -694,6 +753,305 @@ fn read_rows(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError>
         rows.push(decode_line(exec, &id, &line)?);
     }
     Ok(Value::List(Arc::new(rows)))
+}
+
+fn files_each(exec: &mut Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    use std::io::BufRead;
+    need(args, 4)?;
+    let path = safe_path(&exec.arg_string(args, 0)?)?;
+    super::access::probe_read(&path)?;
+    let id = exec.arg_string(args, 1)?;
+    let file = exec.arg_string(args, 2)?;
+    let action = exec.arg_string(args, 3)?;
+    let header = named_flag(exec, args, "header")?;
+    if header {
+        let def = exec.structs.get(&id).ok_or_else(|| ExecutionError::new(4018, format!("找不到结构 {id}")))?;
+        if !matches!(def.layout, LayoutKind::Split) {
+            return Err(ExecutionError::new(4018, "header 只适用于 split".into()));
+        }
+    }
+    let input = std::fs::File::open(&path).map_err(|e| ExecutionError::new(3002, format!("{path}: {e}")))?;
+    let mut reader = std::io::BufReader::new(input);
+    let mut line = String::new();
+    let mut count = 0i64;
+    let mut saw_line = false;
+    loop {
+        line.clear();
+        let n = reader.read_line(&mut line).map_err(|e| ExecutionError::new(3002, format!("{path}: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        if line.ends_with('\n') {
+            line.pop();
+        }
+        if line.ends_with('\r') {
+            line.pop();
+        }
+        if !saw_line {
+            saw_line = true;
+            if header {
+                let def = exec.structs.get(&id).ok_or_else(|| ExecutionError::new(4018, format!("找不到结构 {id}")))?;
+                let sep = def.sep.as_deref().unwrap_or(",");
+                let parts = split_quoted(&line, sep)?;
+                let names: Vec<_> = def.fields.iter().map(|field| field.name.as_str()).collect();
+                if parts.iter().map(String::as_str).collect::<Vec<_>>() != names {
+                    return Err(ExecutionError::new(4018, format!("表头应为 {}", names.join(sep))));
+                }
+                continue;
+            }
+        }
+        let row = decode_line(exec, &id, &line)?;
+        exec.call_named_drop(&file, &action, row)?;
+        count += 1;
+    }
+    if header && !saw_line {
+        return Err(ExecutionError::new(4018, "没有表头可核对".into()));
+    }
+    Ok(Value::Number(count))
+}
+
+fn files_field(exec: &mut Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    use std::io::Read;
+    need(args, 4)?;
+    let path = safe_path(&exec.arg_string(args, 0)?)?;
+    super::access::probe_read(&path)?;
+    let id = exec.arg_string(args, 1)?;
+    let file = exec.arg_string(args, 2)?;
+    let action = exec.arg_string(args, 3)?;
+    let def = exec.structs.get(&id).ok_or_else(|| ExecutionError::new(4018, format!("找不到结构 {id}")))?.clone();
+    if !matches!(def.layout, LayoutKind::Block) {
+        return Err(ExecutionError::new(4018, "files.field 只适用于 block".into()));
+    }
+    let mut input = std::fs::File::open(&path).map_err(|e| ExecutionError::new(3002, format!("{path}: {e}")))?;
+    let mut count = 0i64;
+    for field in &def.fields {
+        let mut len_buf = [0u8; 4];
+        input.read_exact(&mut len_buf).map_err(|_| ExecutionError::new(4018, format!("字段 {} 的块不完整", field.name)))?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut payload = vec![0u8; len];
+        input.read_exact(&mut payload).map_err(|_| ExecutionError::new(4018, format!("字段 {} 的块不完整", field.name)))?;
+        let value = match &field.ty {
+            FieldType::Bytes => Value::Bytes(Arc::new(payload)),
+            FieldType::Str => Value::String(String::from_utf8(payload).map_err(|_| ExecutionError::new(4015, format!("字段 {} 不是合法的 UTF-8", field.name)))?),
+            FieldType::Int => {
+                let text = String::from_utf8(payload).map_err(|_| ExecutionError::new(4015, format!("字段 {} 不是合法的 UTF-8", field.name)))?;
+                Value::Number(text.parse().map_err(|_| ExecutionError::new(4012, format!("字段 {} 不是整数", field.name)))?)
+            }
+            FieldType::Float => {
+                let text = String::from_utf8(payload).map_err(|_| ExecutionError::new(4015, format!("字段 {} 不是合法的 UTF-8", field.name)))?;
+                Value::Float(text.parse().map_err(|_| ExecutionError::new(4012, format!("字段 {} 不是小数", field.name)))?)
+            }
+            FieldType::Bool => {
+                let text = String::from_utf8(payload).map_err(|_| ExecutionError::new(4015, format!("字段 {} 不是合法的 UTF-8", field.name)))?;
+                match text.as_str() {
+                    "true" => Value::Bool(true),
+                    "false" => Value::Bool(false),
+                    _ => return Err(ExecutionError::new(4012, format!("字段 {} 不是布尔值", field.name))),
+                }
+            }
+            _ => return Err(ExecutionError::new(4018, "block 不能嵌套结构或列表".into())),
+        };
+        exec.call_named_drop_many(&file, &action, vec![Value::String(field.name.clone()), value])?;
+        count += 1;
+    }
+    Ok(Value::Number(count))
+}
+
+fn repo_put(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    need(args, 1)?;
+    let repo = exec.repo.clone().ok_or_else(|| ExecutionError::new(4011, "没有 repo".into()))?;
+    let source = safe_path(&exec.arg_string(args, 0)?)?;
+    let dest = super::store::admit(&exec.repo_lock, &repo.dir, &source, repo.capacity, repo.max_pkgs)?;
+    Ok(Value::String(dest))
+}
+
+fn repo_get(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    need(args, 2)?;
+    let repo = exec.repo.clone().ok_or_else(|| ExecutionError::new(4011, "没有 repo".into()))?;
+    let dest = super::store::get(&repo.dir, &exec.arg_string(args, 0)?, &exec.arg_string(args, 1)?)?;
+    Ok(Value::String(dest))
+}
+
+fn repo_fetch(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    need(args, 4)?;
+    let dest = super::depot::fetch(exec, &exec.arg_string(args, 0)?, &exec.arg_string(args, 1)?, &exec.arg_string(args, 2)?, &safe_path(&exec.arg_string(args, 3)?)?)?;
+    Ok(Value::String(dest))
+}
+
+fn repo_push(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    need(args, 2)?;
+    super::depot::push(exec, &exec.arg_string(args, 0)?, &safe_path(&exec.arg_string(args, 1)?)?)?;
+    Ok(Value::Bool(true))
+}
+
+fn crypto_pair(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    need(args, 2)?;
+    let private_path = safe_path(&exec.arg_string(args, 0)?)?;
+    let public_path = safe_path(&exec.arg_string(args, 1)?)?;
+    if private_path == public_path {
+        return Err(ExecutionError::new(3003, "私钥和公钥不能是同一个文件".into()));
+    }
+    if std::fs::metadata(&private_path).is_ok() || std::fs::metadata(&public_path).is_ok() {
+        return Err(ExecutionError::new(3003, "密钥文件已存在".into()));
+    }
+    let pkcs8 = ring::signature::Ed25519KeyPair::generate_pkcs8(&ring::rand::SystemRandom::new())
+        .map_err(|_| ExecutionError::new(2001, "生成密钥失败".into()))?;
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .map_err(|_| ExecutionError::new(2001, "生成密钥失败".into()))?;
+    std::fs::write(&private_path, pkcs8.as_ref()).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+    if let Err(err) = std::fs::write(&public_path, ring::signature::KeyPair::public_key(&pair).as_ref()) {
+        let _ = std::fs::remove_file(&private_path);
+        return Err(ExecutionError::new(3003, err.to_string()));
+    }
+    Ok(Value::Bool(true))
+}
+
+fn files_seal(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    need(args, 2)?;
+    let dir = safe_path(&exec.arg_string(args, 0)?)?;
+    let key_path = safe_path(&exec.arg_string(args, 1)?)?;
+    let manifest_path = format!("{dir}/manifest.json");
+    let manifest = std::fs::read(&manifest_path).map_err(|e| ExecutionError::new(3002, format!("{manifest_path}: {e}")))?;
+    let pkcs8 = std::fs::read(&key_path).map_err(|e| ExecutionError::new(3002, format!("{key_path}: {e}")))?;
+    let pair = ring::signature::Ed25519KeyPair::from_pkcs8(&pkcs8).map_err(|_| ExecutionError::new(2001, "私钥不是 Ed25519 PKCS8".into()))?;
+    let signature = pair.sign(&manifest);
+    std::fs::write(format!("{dir}/dake.pub"), ring::signature::KeyPair::public_key(&pair).as_ref()).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+    std::fs::write(format!("{dir}/dake.seal"), signature.as_ref()).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+    Ok(Value::Bool(true))
+}
+
+fn files_unseal(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    need(args, 2)?;
+    let dir = safe_path(&exec.arg_string(args, 0)?)?;
+    let trusted_path = safe_path(&exec.arg_string(args, 1)?)?;
+    let trusted = std::fs::read(&trusted_path).map_err(|e| ExecutionError::new(3002, format!("{trusted_path}: {e}")))?;
+    let public = std::fs::read(format!("{dir}/dake.pub")).map_err(|e| ExecutionError::new(3002, format!("dake.pub: {e}")))?;
+    if public != trusted {
+        return Err(ExecutionError::new(2004, "公钥与包里的 dake.pub 不一致".into()));
+    }
+    let signature = std::fs::read(format!("{dir}/dake.seal")).map_err(|e| ExecutionError::new(3002, format!("dake.seal: {e}")))?;
+    let manifest = std::fs::read(format!("{dir}/manifest.json")).map_err(|e| ExecutionError::new(3002, format!("manifest.json: {e}")))?;
+    let key = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &public);
+    key.verify(&manifest, &signature).map_err(|_| ExecutionError::new(2004, "公钥签名不符".into()))?;
+    check_manifest_hashes(&dir, &manifest)?;
+    Ok(Value::Bool(true))
+}
+
+fn check_manifest_hashes(dir: &str, manifest: &[u8]) -> Result<(), ExecutionError> {
+    let text = std::str::from_utf8(manifest).map_err(|_| ExecutionError::new(4012, "清单不是 UTF-8".into()))?;
+    let value = crate::data::SerializableValue::from_json(text).map_err(|e| ExecutionError::new(e.code(), e.message().to_string()))?;
+    let crate::data::SerializableValue::Object(map) = value else {
+        return Err(ExecutionError::new(4012, "清单不是对象".into()));
+    };
+    let files = match map.get("files") {
+        Some(crate::data::SerializableValue::Array(items)) => items,
+        _ => return Err(ExecutionError::new(4012, "清单没有 files".into())),
+    };
+    for item in files {
+        let crate::data::SerializableValue::Object(file) = item else {
+            return Err(ExecutionError::new(4012, "清单文件项不是对象".into()));
+        };
+        let file_name = json_string(file.get("name"))?;
+        let expect = json_string(file.get("blake3"))?;
+        let path = safe_path(&format!("{dir}/{file_name}"))?;
+        let got = crate::executor::paths::hash_chunks(&path).map_err(|e| ExecutionError::new(3002, format!("{path}: {e}")))?;
+        if got != expect {
+            return Err(ExecutionError::new(4012, format!("{file_name} 的哈希不符")));
+        }
+    }
+    Ok(())
+}
+
+fn files_verify(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    need(args, 1)?;
+    let dir = safe_path(&exec.arg_string(args, 0)?)?;
+    let key = match named_arg(args, "key") {
+        Some(arg) => Some(safe_path(&exec.arg_value_string(&arg.temp)?)?),
+        None => None,
+    };
+    let (name, version, replaces, depends) = verify_package(&dir, key.as_deref())?;
+    let depend_dirs = if named_arg(args, "depend").is_some() {
+        exec.named_string_list(args, "depend")?
+    } else {
+        Vec::new()
+    };
+    if depend_dirs.len() != depends.len() {
+        return Err(ExecutionError::new(4011, format!("depends 有 {} 项，depend 给了 {} 个目录", depends.len(), depend_dirs.len())));
+    }
+    for (declared, depend_dir) in depends.iter().zip(depend_dirs) {
+        let depend_dir = safe_path(&depend_dir)?;
+        let (dep_name, dep_version, _, _) = verify_package(&depend_dir, key.as_deref())?;
+        let expect = format!("{dep_name} {dep_version}");
+        if declared != &expect {
+            return Err(ExecutionError::new(4012, format!("依赖应为 {declared}，目录里是 {expect}")));
+        }
+    }
+    match (replaces.is_empty(), named_arg(args, "replace")) {
+        (true, None) => {}
+        (false, Some(arg)) => {
+            let replace_dir = safe_path(&exec.arg_value_string(&arg.temp)?)?;
+            let (old_name, old_version, _, _) = verify_package(&replace_dir, key.as_deref())?;
+            let expect = format!("{old_name} {old_version}");
+            if replaces != expect {
+                return Err(ExecutionError::new(4012, format!("replaces 应为 {replaces}，目录里是 {expect}")));
+            }
+        }
+        (false, None) => return Err(ExecutionError::new(4011, "清单有 replaces，需要 replace".into())),
+        (true, Some(_)) => return Err(ExecutionError::new(4011, "清单没有 replaces".into())),
+    }
+    let _ = (name, version);
+    Ok(Value::Bool(true))
+}
+
+fn verify_package(dir: &str, key: Option<&str>) -> Result<(String, String, String, Vec<String>), ExecutionError> {
+    let manifest_path = format!("{dir}/manifest.json");
+    let text = std::fs::read_to_string(&manifest_path).map_err(|e| ExecutionError::new(3002, format!("{manifest_path}: {e}")))?;
+    let value = crate::data::SerializableValue::from_json(&text).map_err(|e| ExecutionError::new(e.code(), e.message().to_string()))?;
+    let crate::data::SerializableValue::Object(map) = value else {
+        return Err(ExecutionError::new(4012, "清单不是对象".into()));
+    };
+    let name = json_string(map.get("name"))?;
+    let version = json_string(map.get("version"))?;
+    let replaces = json_string(map.get("replaces")).unwrap_or_default();
+    let signature = json_string(map.get("signature")).unwrap_or_default();
+    let depends = match map.get("depends") {
+        Some(crate::data::SerializableValue::Array(items)) => items.iter().map(|item| json_string(Some(item))).collect::<Result<Vec<_>, _>>()?,
+        _ => Vec::new(),
+    };
+    let files = match map.get("files") {
+        Some(crate::data::SerializableValue::Array(items)) => items,
+        _ => return Err(ExecutionError::new(4012, "清单没有 files".into())),
+    };
+    let mut pairs = Vec::new();
+    for item in files {
+        let crate::data::SerializableValue::Object(file) = item else {
+            return Err(ExecutionError::new(4012, "清单文件项不是对象".into()));
+        };
+        let file_name = json_string(file.get("name"))?;
+        let expect = json_string(file.get("blake3"))?;
+        let path = safe_path(&format!("{dir}/{file_name}"))?;
+        let got = crate::executor::paths::hash_chunks(&path).map_err(|e| ExecutionError::new(3002, format!("{path}: {e}")))?;
+        if got != expect {
+            return Err(ExecutionError::new(4012, format!("{file_name} 的哈希不符").into()));
+        }
+        pairs.push((file_name, expect));
+    }
+    if !signature.is_empty() {
+        let key = key.ok_or_else(|| ExecutionError::new(4011, "清单有签名，需要 key".into()))?;
+        let key = super::package::load_sign_key(key).map_err(|err| ExecutionError::new(2001, err.message))?;
+        let mac = super::package::mac_manifest(&key, &name, &version, &replaces, &depends, &pairs);
+        if mac != signature {
+            return Err(ExecutionError::new(2004, "签名不符".into()));
+        }
+    }
+    Ok((name, version, replaces, depends))
+}
+
+fn json_string(value: Option<&crate::data::SerializableValue>) -> Result<String, ExecutionError> {
+    match value {
+        Some(crate::data::SerializableValue::String(text)) => Ok(text.clone()),
+        _ => Err(ExecutionError::new(4012, "清单字段需要字符串".into())),
+    }
 }
 
 fn write_rows(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
@@ -749,25 +1107,66 @@ fn write_rows(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError
             std::fs::create_dir_all(parent).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
         }
     }
-    let body = if append {
-        let existing = if std::path::Path::new(&path).exists() {
-            let bytes = std::fs::read(&path).map_err(|e| ExecutionError::new(3002, format!("{path}: {e}")))?;
-            String::from_utf8(bytes).map_err(|_| ExecutionError::new(4015, "文件不是合法的 UTF-8".into()))?
+    if append {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new().create(true).read(true).append(true).open(&path)
+            .map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+        let len = file.seek(SeekFrom::End(0)).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+        let needs_break = if len == 0 {
+            false
         } else {
-            String::new()
+            file.seek(SeekFrom::End(-1)).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+            let mut last = [0u8; 1];
+            file.read_exact(&mut last).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+            last[0] != b'\n'
         };
-        if existing.is_empty() || existing.ends_with('\n') {
-            format!("{existing}{body}")
-        } else if body.is_empty() {
-            existing
-        } else {
-            format!("{existing}\n{body}")
+        if needs_break && !body.is_empty() {
+            file.write_all(b"\n").map_err(|e| ExecutionError::new(3003, e.to_string()))?;
         }
+        file.write_all(body.as_bytes()).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
     } else {
-        body
-    };
-    std::fs::write(&path, body).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+        crate::executor::paths::write_chunks(&path, body.as_bytes()).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+    }
     Ok(Value::List(Arc::new(items)))
+}
+
+fn write_row(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError> {
+    use std::io::Write;
+    need(args, 2)?;
+    let path = safe_path(&exec.arg_string(args, 0)?)?;
+    super::access::probe_write(&path)?;
+    let record = exec.get(&args[1].temp)?;
+    let Value::Record { path: id, fields } = &record else {
+        return Err(ExecutionError::new(4012, "files.write.row 需要记录".into()));
+    };
+    enforce_record(exec, id, fields.as_slice())?;
+    let def = exec.structs.get(id).ok_or_else(|| ExecutionError::new(4018, format!("找不到结构 {id}")))?;
+    let text = match def.layout {
+        LayoutKind::Split => encode_fields(def, fields.as_slice())?,
+        LayoutKind::Json => encode_json(exec, def, fields.as_slice())?,
+        _ => return Err(ExecutionError::new(4018, "files.write.row 需要 split 或 json 结构".into())),
+    };
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+        }
+    }
+    let header = named_flag(exec, args, "header")?;
+    let empty = std::fs::metadata(&path).map(|meta| meta.len() == 0).unwrap_or(true);
+    let mut file = std::fs::OpenOptions::new().create(true).append(true).open(&path)
+        .map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+    if header {
+        if !matches!(def.layout, LayoutKind::Split) {
+            return Err(ExecutionError::new(4018, "header 只适用于 split".into()));
+        }
+        if empty {
+            let sep = def.sep.clone().unwrap_or_else(|| ",".into());
+            let names: Vec<_> = def.fields.iter().map(|field| field.name.clone()).collect();
+            writeln!(file, "{}", names.join(&sep)).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+        }
+    }
+    writeln!(file, "{text}").map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+    Ok(record)
 }
 
 fn decode_line(exec: &Executor, id: &str, text: &str) -> Result<Value, ExecutionError> {
@@ -1364,6 +1763,81 @@ fn quote_field(text: &str, sep: &str) -> String {
     }
 }
 
+fn decode_block(def: &crate::dsl::ir::StructIr, bytes: &[u8]) -> Result<Vec<(String, Value)>, ExecutionError> {
+    let mut reader = std::io::Cursor::new(bytes);
+    read_block_fields(def, &mut reader)
+}
+
+fn read_block_fields(def: &crate::dsl::ir::StructIr, reader: &mut impl std::io::Read) -> Result<Vec<(String, Value)>, ExecutionError> {
+    use std::io::Read;
+    let mut fields = Vec::new();
+    for field in &def.fields {
+        let mut len_buf = [0u8; 4];
+        reader.read_exact(&mut len_buf).map_err(|_| ExecutionError::new(4018, format!("字段 {} 的块不完整", field.name)))?;
+        let len = u32::from_le_bytes(len_buf) as usize;
+        let mut payload = vec![0u8; len];
+        reader.read_exact(&mut payload).map_err(|_| ExecutionError::new(4018, format!("字段 {} 的块不完整", field.name)))?;
+        let value = match &field.ty {
+            FieldType::Bytes => Value::Bytes(Arc::new(payload)),
+            FieldType::Str => Value::String(String::from_utf8(payload).map_err(|_| ExecutionError::new(4015, format!("字段 {} 不是合法的 UTF-8", field.name)))?),
+            FieldType::Int => {
+                let text = String::from_utf8(payload).map_err(|_| ExecutionError::new(4015, format!("字段 {} 不是合法的 UTF-8", field.name)))?;
+                Value::Number(text.parse().map_err(|_| ExecutionError::new(4012, format!("字段 {} 不是整数", field.name)))?)
+            }
+            FieldType::Float => {
+                let text = String::from_utf8(payload).map_err(|_| ExecutionError::new(4015, format!("字段 {} 不是合法的 UTF-8", field.name)))?;
+                Value::Float(text.parse().map_err(|_| ExecutionError::new(4012, format!("字段 {} 不是小数", field.name)))?)
+            }
+            FieldType::Bool => {
+                let text = String::from_utf8(payload).map_err(|_| ExecutionError::new(4015, format!("字段 {} 不是合法的 UTF-8", field.name)))?;
+                match text.as_str() {
+                    "true" => Value::Bool(true),
+                    "false" => Value::Bool(false),
+                    _ => return Err(ExecutionError::new(4012, format!("字段 {} 不是布尔值", field.name))),
+                }
+            }
+            _ => return Err(ExecutionError::new(4018, "block 不能嵌套结构或列表".into())),
+        };
+        fields.push((field.name.clone(), value));
+    }
+    let mut extra = [0u8; 1];
+    match reader.read(&mut extra) {
+        Ok(0) => {}
+        Ok(_) => return Err(ExecutionError::new(4018, "block 后面还有多余的字节".into())),
+        Err(err) => return Err(ExecutionError::new(3002, err.to_string())),
+    }
+    Ok(fields)
+}
+
+pub(super) fn decode_block_file(exec: &Executor, id: &str, path: &str) -> Result<Value, ExecutionError> {
+    let def = exec.structs.get(id).ok_or_else(|| ExecutionError::new(4018, format!("找不到结构 {id}")))?;
+    if !matches!(def.layout, LayoutKind::Block) {
+        let bytes = crate::executor::paths::read_chunks(path).map_err(|e| ExecutionError::new(3002, format!("{path}: {e}")))?;
+        return decode_body(exec, id, bytes);
+    }
+    let mut file = std::fs::File::open(path).map_err(|e| ExecutionError::new(3002, format!("{path}: {e}")))?;
+    let fields = read_block_fields(def, &mut file)?;
+    finish_record(exec, id, fields)
+}
+
+fn encode_block(def: &crate::dsl::ir::StructIr, fields: &[(String, Value)]) -> Result<Vec<u8>, ExecutionError> {
+    let mut out = Vec::new();
+    for (field, (_, value)) in def.fields.iter().zip(fields) {
+        let payload = match (&field.ty, value) {
+            (FieldType::Bytes, Value::Bytes(bytes)) => bytes.as_ref().clone(),
+            (FieldType::Str, Value::String(text)) => text.as_bytes().to_vec(),
+            (FieldType::Int, Value::Number(n)) => n.to_string().into_bytes(),
+            (FieldType::Float, Value::Float(n)) => n.to_string().into_bytes(),
+            (FieldType::Bool, Value::Bool(bit)) => bit.to_string().into_bytes(),
+            _ => return Err(ExecutionError::new(4012, format!("字段 {} 的类型不符", field.name))),
+        };
+        let len = u32::try_from(payload.len()).map_err(|_| ExecutionError::new(4012, format!("字段 {} 的块超过 4 GiB", field.name)))?;
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&payload);
+    }
+    Ok(out)
+}
+
 fn decode_fields(def: &crate::dsl::ir::StructIr, text: &str) -> Result<Vec<(String, Value)>, ExecutionError> {
     let sep = def.sep.as_deref().ok_or_else(|| ExecutionError::new(4018, "split 缺少 sep".into()))?;
     let parts = split_quoted(text, sep)?;
@@ -1685,7 +2159,7 @@ fn read_bytes(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionError
     need(args, 1)?;
     let path = safe_path(&exec.arg_string(args, 0)?)?;
     super::access::probe_read(&path)?;
-    let bytes = std::fs::read(&path).map_err(|e| ExecutionError::new(3002, format!("{path}: {e}")))?;
+    let bytes = crate::executor::paths::read_chunks(&path).map_err(|e| ExecutionError::new(3002, format!("{path}: {e}")))?;
     Ok(Value::Bytes(Arc::new(bytes)))
 }
 
@@ -1710,7 +2184,7 @@ fn write_bytes(exec: &Executor, args: &[CallArg]) -> Result<Value, ExecutionErro
             std::fs::create_dir_all(parent).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
         }
     }
-    std::fs::write(&path, bytes.as_slice()).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
+    crate::executor::paths::write_chunks(&path, bytes.as_slice()).map_err(|e| ExecutionError::new(3003, e.to_string()))?;
     Ok(Value::Bytes(bytes))
 }
 
