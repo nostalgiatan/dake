@@ -1,6 +1,6 @@
 [package]
 name = "dake"
-version = "0.1.0"
+version = "0.6.0"
 edition = "2021"
 
 [dependencies]
@@ -10,9 +10,19 @@ clap = { version = "4.5.48", features = ["derive"] }
 # Local crates
 error = { path = "src/crates/error" }
 regex = "1.12.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-native-certs = "0.8"
+rustls-pemfile = "2"
+notify = "6"
+signal-hook = "0.3"
+libc = "0.2"
 semver = "1.0.27"
 smol = "2.0.2"
+sysinfo = "0.37"
 zstd = "0.13.3"
+
+[dev-dependencies]
+rcgen = "0.13"
 
 [workspace]
 members = [

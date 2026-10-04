@@ -1,40 +1,35 @@
 /*
- * 语法分析器 (Parser)
- *
- * 手工实现的递归下降解析器，将 Token 流转换为 AST。
- * 严格遵循 DSL 语法规则。
+ * 递归下降解析器。
+ * 块以 Indent / Dedent 结束，路径用 :: 和 . 组成。
  */
 
 use crate::dsl::ast::*;
-use crate::dsl::lexer::{Token, Lexer};
-use error::{ErrorInfo, ErrorCategory, ErrorSeverity};
+use crate::dsl::lexer::{Lexer, Token};
+use error::{ErrorCategory, ErrorInfo, ErrorKind, ErrorSeverity};
 use std::fmt;
 
-/// 解析错误
 #[derive(Debug)]
 pub struct ParseError {
     info: ErrorInfo,
 }
 
 impl ParseError {
-    /// 创建新的解析错误
     pub fn new(code: u32, message: String) -> Self {
         Self {
-            info: ErrorInfo::new(code, message)
-                .with_category(ErrorCategory::Parse)
-                .with_severity(ErrorSeverity::Error),
-        }
-    }
-    
-    /// 带上下文的解析错误
-    #[allow(dead_code)]
-    pub fn with_context(code: u32, message: String, context: String) -> Self {
-        Self {
-            info: ErrorInfo::new(code, message)
+            info: ErrorInfo::new(code, message.clone())
                 .with_category(ErrorCategory::Parse)
                 .with_severity(ErrorSeverity::Error)
-                .with_context(context),
+                .with_hint(crate::dsl::diagnose::hint(code, &message)),
         }
+    }
+
+    fn at(mut self, line: u32, column: u32, hint: String) -> Self {
+        self.info = ErrorInfo::new(self.info.error_code(), self.info.error_message())
+            .with_category(ErrorCategory::Parse)
+            .with_severity(ErrorSeverity::Error)
+            .with_place("", line, column)
+            .with_hint(hint);
+        self
     }
 }
 
@@ -46,822 +41,902 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-/// 语法分析器
 pub struct Parser {
     tokens: Vec<Token>,
+    spans: Vec<(u32, u32)>,
     position: usize,
 }
 
+fn name_token(token: &Token) -> Option<String> {
+    Some(match token {
+        Token::Ident(name) => name.clone(),
+        Token::Set => "set".into(),
+        Token::Env => "env".into(),
+        Token::If => "if".into(),
+        Token::Elif => "elif".into(),
+        Token::Else => "else".into(),
+        Token::Lib => "lib".into(),
+        Token::Repo => "repo".into(),
+        Token::Use => "use".into(),
+        Token::Action => "action".into(),
+        Token::Struct => "struct".into(),
+        Token::Pipe => "pipe".into(),
+        Token::Each => "each".into(),
+        Token::As => "as".into(),
+        Token::In => "in".into(),
+        Token::Print => "print".into(),
+        Token::Doing => "doing".into(),
+        Token::Await => "await".into(),
+        Token::Url => "url".into(),
+        Token::Dir => "dir".into(),
+        Token::Serve => "serve".into(),
+        Token::Route => "route".into(),
+        Token::Catch => "catch".into(),
+        Token::Stop => "stop".into(),
+        Token::Error => "error".into(),
+        Token::Num => "num".into(),
+        Token::Str => "str".into(),
+        Token::Bool(true) => "true".into(),
+        Token::Bool(false) => "false".into(),
+        _ => return None,
+    })
+}
+
 impl Parser {
-    /// 创建新的语法分析器
-    ///
-    /// # 参数
-    /// - `input`: DSL 源代码字符串
-    ///
-    /// # 返回值
-    /// - `Ok(Parser)`: 成功创建的解析器
-    /// - `Err(ParseError)`: 词法分析错误
     pub fn new(input: &str) -> Result<Self, ParseError> {
         let mut lexer = Lexer::new(input);
-        let tokens = lexer.tokenize()
-            .map_err(|e| ParseError::new(1000, format!("词法分析失败: {}", e)))?;
-        
-        Ok(Self {
-            tokens,
-            position: 0,
-        })
-    }
-    
-    /// 解析完整的 DSL 程序
-    ///
-    /// # 返回值
-    /// - `Ok(Ast)`: 解析成功的抽象语法树
-    /// - `Err(ParseError)`: 语法分析错误
-    pub fn parse(&mut self) -> Result<Ast, ParseError> {
-        let mut statements = Vec::new();
-        
-        while !self.is_at_end() {
-            // 跳过注释和换行
-            if self.match_token(&Token::Newline) || matches!(self.current(), Token::Comment(_)) {
-                self.advance();
-                continue;
-            }
-            
-            if self.current() == &Token::Eof {
-                break;
-            }
-            
-            let stmt = self.parse_statement()?;
-            statements.push(stmt);
+        let spanned = lexer
+            .tokenize()
+            .map_err(|e| ParseError::new(1000, format!("词法分析失败: {e}")))?;
+        let mut tokens = Vec::new();
+        let mut spans = Vec::new();
+        for (token, line, column) in spanned {
+            tokens.push(token);
+            spans.push((line, column));
         }
-        
+        Ok(Self { tokens, spans, position: 0 })
+    }
+
+    pub fn parse(&mut self) -> Result<Ast, ParseError> {
+        let statements = self.parse_block_body(false)?;
         Ok(Ast { statements })
     }
-    
-    /// 解析单个语句
+
+    fn parse_block_body(&mut self, indented: bool) -> Result<Vec<Statement>, ParseError> {
+        let mut statements = Vec::new();
+        if indented {
+            self.skip_newlines();
+            self.expect(&Token::Indent)?;
+        }
+        loop {
+            self.skip_newlines();
+            if self.is_at_end() || self.current() == &Token::Eof {
+                break;
+            }
+            if self.current() == &Token::Dedent {
+                if indented {
+                    self.advance();
+                }
+                break;
+            }
+            if !indented && self.current() == &Token::Dedent {
+                return Err(self.fail(1002, "顶层出现多余的缩进结束"));
+            }
+            let (line, column) = self.place();
+            statements.push(Statement::At { line, column });
+            statements.push(self.parse_statement()?);
+        }
+        Ok(statements)
+    }
+
     fn parse_statement(&mut self) -> Result<Statement, ParseError> {
-        let token = self.current().clone();
-        
-        match &token {
+        match self.current().clone() {
             Token::Set => self.parse_set(),
-            Token::If => self.parse_control_flow(),
+            Token::Use => self.parse_use(),
+            Token::Action => self.parse_action(),
+            Token::Struct => self.parse_struct(),
+            Token::Pipe => self.parse_pipe(),
+            Token::If => self.parse_if(),
             Token::Lib => self.parse_lib(),
             Token::Repo => self.parse_repo(),
-            Token::Log => self.parse_log_statement(),
-            Token::Error => self.parse_error_def(),
-            Token::Data => self.parse_data_statement(),
-            Token::Comm => self.parse_comm_statement(),
             Token::Print => self.parse_print(),
             Token::Doing => self.parse_doing(),
             Token::Await => self.parse_await(),
-            Token::Files => self.parse_files_statement(),
+            Token::Url => self.parse_url(),
+            Token::Dir => self.parse_dir(),
+            Token::Serve => self.parse_serve(),
+            Token::Route => self.parse_route_stmt(),
             Token::Catch => self.parse_catch(),
-            Token::Comment(c) => {
-                let comment = c.clone();
+            Token::Stop => {
                 self.advance();
-                Ok(Statement::Comment(comment))
+                Ok(Statement::Stop)
             }
-            _ => Err(ParseError::new(
-                1001,
-                format!("意外的 Token: {}", token),
-            )),
+            Token::Each => self.parse_each(),
+            Token::Error => self.parse_error(),
+            Token::Ident(_) => {
+                let path = self.parse_path()?;
+                let args = if self.current() == &Token::LParen {
+                    self.parse_arg_list()?
+                } else {
+                    Vec::new()
+                };
+                Ok(Statement::Call { path, args })
+            }
+            other => Err(self.fail(1001, format!("意外的记号: {other}"))),
         }
     }
-    
-    /// 解析 set 语句
+
     fn parse_set(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Set)?;
-        
-        // 检查是否是 set.env
-        if self.match_token(&Token::Dot) {
-            self.advance(); // 消费 .
+        let env = if self.current() == &Token::Dot {
+            self.advance();
             self.expect(&Token::Env)?;
-            self.expect(&Token::LParen)?;
-            
-            let key = self.parse_identifier()?;
-            self.expect(&Token::Comma)?;
-            let value = self.parse_value()?;
-            
-            self.expect(&Token::RParen)?;
-            
-            return Ok(Statement::SetEnv { key, value });
-        }
-        
-        // 普通 set
+            true
+        } else {
+            false
+        };
         self.expect(&Token::LParen)?;
-        let key = self.parse_identifier()?;
+        let key = self.parse_ident()?;
         self.expect(&Token::Comma)?;
-        let value = self.parse_value()?;
+        let value = self.parse_expr()?;
         self.expect(&Token::RParen)?;
-        
-        Ok(Statement::Set { key, value })
+        if env {
+            Ok(Statement::SetEnv { key, value })
+        } else {
+            Ok(Statement::Set { key, value })
+        }
     }
-    
-    /// 解析控制流语句
-    fn parse_control_flow(&mut self) -> Result<Statement, ParseError> {
-        self.expect(&Token::If)?;
-        let if_condition = self.parse_expression()?;
+
+    fn parse_use(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Use)?;
+        let file = self.expect_string()?;
+        self.expect(&Token::As)?;
+        let alias = self.parse_module_path()?;
+        Ok(Statement::Use { file, alias })
+    }
+
+    fn parse_action(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Action)?;
+        let name = self.parse_ident()?;
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        if self.current() != &Token::RParen {
+            params.push(self.parse_ident()?);
+            while self.current() == &Token::Comma {
+                self.advance();
+                params.push(self.parse_ident()?);
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.expect(&Token::Colon)?;
+        let body = self.parse_block_body(true)?;
+        Ok(Statement::Action { name, params, body })
+    }
+
+    fn parse_struct(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Struct)?;
+        let name = self.parse_ident()?;
         self.expect(&Token::Colon)?;
         self.skip_newlines();
-        
-        let if_body = self.parse_block()?;
-        
-        let mut elif_branches = Vec::new();
-        while self.match_token(&Token::Elif) {
-            self.advance();
-            let condition = self.parse_expression()?;
-            self.expect(&Token::Colon)?;
+        self.expect(&Token::Indent)?;
+        let mut from = None;
+        let mut layout = None;
+        let mut sep = None;
+        let mut order = Endian::Be;
+        let mut replaces = None;
+        let mut fields = Vec::new();
+        loop {
             self.skip_newlines();
-            let body = self.parse_block()?;
-            elif_branches.push((condition, body));
+            if self.current() == &Token::Dedent {
+                self.advance();
+                break;
+            }
+            if self.is_at_end() {
+                break;
+            }
+            let key = self.parse_ident()?;
+            self.expect(&Token::Colon)?;
+            match key.as_str() {
+                "from" => {
+                    let carrier = self.parse_name()?;
+                    from = Some(match carrier.as_str() {
+                        "str" => Carrier::Str,
+                        "bytes" => Carrier::Bytes,
+                        other => return Err(self.fail(1004, format!("from 只能是 str 或 bytes，得到 {other}"))),
+                    });
+                }
+                "layout" => {
+                    let kind = self.parse_ident()?;
+                    layout = Some(match kind.as_str() {
+                        "whole" => LayoutKind::Whole,
+                        "lines" => LayoutKind::Lines,
+                        "split" => LayoutKind::Split,
+                        "json" => LayoutKind::Json,
+                        "width" => LayoutKind::Width,
+                        other => return Err(self.fail(1004, format!("layout 只能是 whole、lines、split、json 或 width，得到 {other}"))),
+                    });
+                }
+                "sep" => {
+                    let Token::String(value) = self.current().clone() else {
+                        return Err(self.fail(1004, "sep 必须是字符串"));
+                    };
+                    self.advance();
+                    if value.is_empty() {
+                        return Err(self.fail(1004, "sep 不能为空"));
+                    }
+                    sep = Some(value);
+                }
+                "order" => {
+                    let kind = self.parse_ident()?;
+                    order = match kind.as_str() {
+                        "be" => Endian::Be,
+                        "le" => Endian::Le,
+                        other => return Err(self.fail(1004, format!("order 只能是 be 或 le，得到 {other}"))),
+                    };
+                }
+                "replaces" => {
+                    if replaces.is_some() {
+                        return Err(self.fail(1004, "replaces 只能写一次"));
+                    }
+                    replaces = Some(self.parse_path()?);
+                }
+                _ => {
+                    let ty = self.parse_field_type()?;
+                    let width = if let Token::Number(n) = *self.current() {
+                        let n = n;
+                        self.advance();
+                        if n <= 0 {
+                            return Err(self.fail(1004, format!("字段 {key} 的宽度必须大于 0")));
+                        }
+                        Some(n as u64)
+                    } else {
+                        None
+                    };
+                    let (check, default, take) = self.parse_field_clauses(&key)?;
+                    fields.push(StructField { name: key, ty, link: None, width, check, default, take });
+                }
+            }
         }
-        
-        let else_branch = if self.match_token(&Token::Else) {
+        let from = from.ok_or_else(|| self.fail(1004, format!("结构 {name} 缺少 from")))?;
+        let layout = layout.ok_or_else(|| self.fail(1004, format!("结构 {name} 缺少 layout")))?;
+        if fields.is_empty() {
+            return Err(self.fail(1004, format!("结构 {name} 没有字段")));
+        }
+        Ok(Statement::Struct { name, from, layout, sep, order, replaces, fields })
+    }
+
+    fn parse_field_clauses(&mut self, field: &str) -> Result<(Option<String>, Option<Value>, Option<String>), ParseError> {
+        let mut check = None;
+        let mut default = None;
+        let mut take = None;
+        while matches!(self.current(), Token::Ident(_)) {
+            let Token::Ident(clause) = self.current().clone() else { break };
+            if !matches!(clause.as_str(), "check" | "default" | "take") {
+                break;
+            }
             self.advance();
             self.expect(&Token::Colon)?;
+            match clause.as_str() {
+                "check" => {
+                    if check.is_some() {
+                        return Err(self.fail(1004, format!("字段 {field} 的 check 只能写一次")));
+                    }
+                    let name = self.parse_ident()?;
+                    if !matches!(name.as_str(), "not_empty" | "email" | "url" | "numeric" | "alpha" | "alphanumeric") {
+                        return Err(self.fail(1004, format!("未知的验证器: {name}")));
+                    }
+                    check = Some(name);
+                }
+                "default" => {
+                    if default.is_some() {
+                        return Err(self.fail(1004, format!("字段 {field} 的 default 只能写一次")));
+                    }
+                    default = Some(self.parse_literal()?);
+                }
+                "take" => {
+                    if take.is_some() {
+                        return Err(self.fail(1004, format!("字段 {field} 的 take 只能写一次")));
+                    }
+                    take = Some(self.parse_ident()?);
+                }
+                _ => unreachable!(),
+            }
+        }
+        Ok((check, default, take))
+    }
+
+    fn parse_literal(&mut self) -> Result<Value, ParseError> {
+        match self.current().clone() {
+            Token::String(text) => {
+                self.advance();
+                Ok(Value::String(text))
+            }
+            Token::Number(n) => {
+                self.advance();
+                Ok(Value::Number(n))
+            }
+            Token::Float(n) => {
+                self.advance();
+                Ok(Value::Float(n))
+            }
+            Token::Bool(b) => {
+                self.advance();
+                Ok(Value::Bool(b))
+            }
+            other => Err(self.fail(1004, format!("default 需要字面量，得到 {other}"))),
+        }
+    }
+
+    fn parse_field_type(&mut self) -> Result<FieldType, ParseError> {
+        if self.current() == &Token::Str {
+            self.advance();
+            return Ok(FieldType::Str);
+        }
+        if let Token::Ident(name) = self.current().clone() {
+            if name == "list" {
+                self.advance();
+                return Ok(FieldType::List(Box::new(self.parse_field_type()?)));
+            }
+            if matches!(name.as_str(), "bytes" | "int" | "float" | "bool") {
+                self.advance();
+                return Ok(match name.as_str() {
+                    "bytes" => FieldType::Bytes,
+                    "int" => FieldType::Int,
+                    "float" => FieldType::Float,
+                    "bool" => FieldType::Bool,
+                    _ => unreachable!(),
+                });
+            }
+        }
+        Ok(FieldType::Struct(self.parse_path()?))
+    }
+
+    fn parse_pipe(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Pipe)?;
+        let name = self.parse_ident()?;
+        let params = if self.current() == &Token::LParen {
+            self.advance();
+            let mut params = Vec::new();
+            if self.current() != &Token::RParen {
+                params.push(self.parse_ident()?);
+                while self.current() == &Token::Comma {
+                    self.advance();
+                    params.push(self.parse_ident()?);
+                }
+            }
+            self.expect(&Token::RParen)?;
+            params
+        } else {
+            Vec::new()
+        };
+        self.expect(&Token::Colon)?;
+        self.skip_newlines();
+        self.expect(&Token::Indent)?;
+        let mut steps = Vec::new();
+        loop {
             self.skip_newlines();
-            Some(self.parse_block()?)
+            if self.current() == &Token::Dedent {
+                self.advance();
+                break;
+            }
+            if self.is_at_end() {
+                break;
+            }
+            let path = self.parse_path()?;
+            if self.current() == &Token::LParen {
+                let args = self.parse_arg_list()?;
+                steps.push(Statement::Call { path, args });
+            } else {
+                steps.push(Statement::Doing(path));
+            }
+        }
+        if steps.is_empty() {
+            return Err(self.fail(1003, format!("管道 {name} 没有步骤")));
+        }
+        Ok(Statement::Pipe { name, params, steps })
+    }
+
+    fn parse_if(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::If)?;
+        let cond = self.parse_expr()?;
+        self.expect(&Token::Colon)?;
+        let then_body = self.parse_block_body(true)?;
+        let mut elifs = Vec::new();
+        while self.current() == &Token::Elif {
+            self.advance();
+            let elif_cond = self.parse_expr()?;
+            self.expect(&Token::Colon)?;
+            elifs.push((elif_cond, self.parse_block_body(true)?));
+        }
+        let else_body = if self.current() == &Token::Else {
+            self.advance();
+            self.expect(&Token::Colon)?;
+            Some(self.parse_block_body(true)?)
         } else {
             None
         };
-        
-        Ok(Statement::ControlFlow(ControlFlow {
-            if_branch: (if_condition, if_body),
-            elif_branches,
-            else_branch,
-        }))
+        Ok(Statement::If { cond, then_body, elifs, else_body })
     }
-    
-    /// 解析代码块（缩进敏感）
-    fn parse_block(&mut self) -> Result<Vec<Statement>, ParseError> {
-        let mut statements = Vec::new();
-        
-        // 简化实现：解析直到遇到 ELIF, ELSE 或下一个顶层语句
-        while !self.is_at_end() 
-            && !self.match_token(&Token::Elif) 
-            && !self.match_token(&Token::Else)
-            && !self.is_block_terminator()
-        {
-            if self.match_token(&Token::Newline) {
-                self.advance();
-                continue;
-            }
-            
-            if matches!(self.current(), Token::Comment(_)) {
-                self.advance();
-                continue;
-            }
-            
-            let stmt = self.parse_statement()?;
-            statements.push(stmt);
-        }
-        
-        Ok(statements)
-    }
-    
-    /// 检查是否是控制流块的终止符
-    /// 只包含会开始新的顶层定义的结构性关键字
-    /// PRINT, DATA等操作关键字可以出现在块内，所以不包含在内
-    fn is_block_terminator(&self) -> bool {
-        matches!(
-            self.current(),
-            Token::Set | Token::If | Token::Lib | Token::Repo
-        )
-    }
-    
-    /// 检查是否是顶层关键字（用于确定语句块结束）
-    fn is_top_level_keyword(&self) -> bool {
-        matches!(
-            self.current(),
-            Token::Set | Token::If | Token::Print | 
-            Token::Data | Token::Comm | Token::Log | Token::Error | 
-            Token::Doing | Token::Await | Token::Files | Token::Catch
-        )
-    }
-    
-    /// 解析 lib 定义
+
     fn parse_lib(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Lib)?;
+        self.expect(&Token::Colon)?;
         self.skip_newlines();
-        
-        // 解析 lib 块的字段
+        self.expect(&Token::Indent)?;
         let mut name = None;
         let mut version = None;
         let mut desc = None;
         let mut repo = None;
-        let mut keywords = None;
+        let mut keywords = Vec::new();
         let mut readme = None;
         let mut mods = Vec::new();
         let mut out_dir = None;
-        
-        while !self.is_at_end() && !self.is_top_level_keyword() {
-            if self.match_token(&Token::Newline) {
-                self.advance();
-                continue;
-            }
-            
-            // 跳过注释
-            if matches!(self.current(), Token::Comment(_)) {
-                self.advance();
-                continue;
-            }
-            
-            let field_name = self.parse_identifier()?;
-            self.expect(&Token::Colon)?;
-            
-            match field_name.as_str() {
-                "name" => {
-                    name = Some(self.parse_string()?);
-                }
-                "version" => {
-                    let ver_str = self.parse_string()?;
-                    version = Some(semver::Version::parse(&ver_str)
-                        .map_err(|e| ParseError::new(1002, format!("无效的版本号: {}", e)))?);
-                }
-                "desc" => {
-                    desc = Some(self.parse_string()?);
-                }
-                "repo" => {
-                    repo = Some(self.parse_string()?);
-                }
-                "keywords" => {
-                    keywords = Some(self.parse_string_list()?);
-                }
-                "readme" => {
-                    readme = Some(self.parse_string()?);
-                }
-                "mods" => {
-                    mods = self.parse_string_list()?;
-                }
-                "out_dir" => {
-                    out_dir = Some(self.parse_string()?);
-                }
-                _ => {
-                    return Err(ParseError::new(1003, format!("未知的 lib 字段: {}", field_name)));
-                }
-            }
-            
+        loop {
             self.skip_newlines();
+            if self.current() == &Token::Dedent {
+                self.advance();
+                break;
+            }
+            let field = self.parse_name()?;
+            self.expect(&Token::Colon)?;
+            match field.as_str() {
+                "name" => name = Some(self.expect_string()?),
+                "version" => version = Some(self.expect_string()?),
+                "desc" => desc = Some(self.expect_string()?),
+                "repo" => repo = Some(self.expect_string()?),
+                "readme" => readme = Some(self.expect_string()?),
+                "out_dir" => out_dir = Some(self.expect_string()?),
+                "keywords" => keywords = self.parse_string_list()?,
+                "mods" => mods = self.parse_string_list()?,
+                other => return Err(self.fail(1004, format!("未知的 lib 字段: {other}"))),
+            }
         }
-        
-        // 验证必填字段
-        let name = name.ok_or_else(|| ParseError::new(1004, "lib 缺少 name 字段".to_string()))?;
-        let version = version.ok_or_else(|| ParseError::new(1004, "lib 缺少 version 字段".to_string()))?;
-        let desc = desc.ok_or_else(|| ParseError::new(1004, "lib 缺少 desc 字段".to_string()))?;
-        let repo = repo.ok_or_else(|| ParseError::new(1004, "lib 缺少 repo 字段".to_string()))?;
-        let keywords = keywords.ok_or_else(|| ParseError::new(1004, "lib 缺少 keywords 字段".to_string()))?;
-        let readme = readme.ok_or_else(|| ParseError::new(1004, "lib 缺少 readme 字段".to_string()))?;
-        let out_dir = out_dir.ok_or_else(|| ParseError::new(1004, "lib 缺少 out_dir 字段".to_string()))?;
-        
+        let version = semver::Version::parse(&version.unwrap_or_else(|| "0.0.0".into()))
+            .map_err(|e| self.fail(1005, format!("版本号无效: {e}")))?;
         Ok(Statement::Lib(LibDefinition {
-            name,
+            name: name.ok_or_else(|| self.fail(1004, "lib 缺少 name"))?,
             version,
-            desc,
-            repo,
+            desc: desc.unwrap_or_default(),
+            repo: repo.unwrap_or_default(),
             keywords,
-            readme,
+            readme: readme.unwrap_or_default(),
             mods,
-            out_dir,
+            out_dir: out_dir.unwrap_or_else(|| "output".into()),
         }))
     }
-    
-    /// 解析 repo 定义
+
     fn parse_repo(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Repo)?;
+        self.expect(&Token::Colon)?;
         self.skip_newlines();
-        
+        self.expect(&Token::Indent)?;
         let mut name = None;
         let mut capacity = None;
         let mut max_pkgs = None;
-        
-        while !self.is_at_end() && !self.is_top_level_keyword() {
-            if self.match_token(&Token::Newline) {
-                self.advance();
-                continue;
-            }
-            
-            // 跳过注释
-            if matches!(self.current(), Token::Comment(_)) {
-                self.advance();
-                continue;
-            }
-            
-            let field_name = self.parse_identifier()?;
-            self.expect(&Token::Colon)?;
-            
-            match field_name.as_str() {
-                "name" => {
-                    name = Some(self.parse_string()?);
-                }
-                "capacity" => {
-                    let num = self.parse_number()?;
-                    capacity = Some(num as u64);
-                    // 期望 MiB 单位
-                    let unit = self.parse_identifier()?;
-                    if unit != "MiB" {
-                        return Err(ParseError::new(1005, format!("容量单位必须是 MiB，得到: {}", unit)));
-                    }
-                }
-                "max_pkgs" => {
-                    let num = self.parse_number()?;
-                    max_pkgs = Some(num as u64);
-                }
-                _ => {
-                    return Err(ParseError::new(1006, format!("未知的 repo 字段: {}", field_name)));
-                }
-            }
-            
+        loop {
             self.skip_newlines();
+            if self.current() == &Token::Dedent {
+                self.advance();
+                break;
+            }
+            let field = self.parse_ident()?;
+            self.expect(&Token::Colon)?;
+            match field.as_str() {
+                "name" => name = Some(self.expect_string()?),
+                "capacity" => capacity = Some(self.expect_number()? as u64),
+                "max_pkgs" => max_pkgs = Some(self.expect_number()? as u64),
+                other => return Err(self.fail(1004, format!("未知的 repo 字段: {other}"))),
+            }
         }
-        
-        let name = name.ok_or_else(|| ParseError::new(1007, "repo 缺少 name 字段".to_string()))?;
-        let capacity = capacity.ok_or_else(|| ParseError::new(1007, "repo 缺少 capacity 字段".to_string()))?;
-        let max_pkgs = max_pkgs.ok_or_else(|| ParseError::new(1007, "repo 缺少 max_pkgs 字段".to_string()))?;
-        
         Ok(Statement::Repo(RepoDefinition {
-            name,
-            capacity,
-            max_pkgs,
+            name: name.ok_or_else(|| self.fail(1004, "repo 缺少 name"))?,
+            capacity: capacity.unwrap_or(0),
+            max_pkgs: max_pkgs.unwrap_or(0),
         }))
     }
-    
-    /// 解析 LOG 相关语句
-    fn parse_log_statement(&mut self) -> Result<Statement, ParseError> {
-        self.expect(&Token::Log)?;
-        self.expect(&Token::Dot)?;
-        
-        let log_type = self.current().clone();
-        
-        match log_type {
-            Token::Init => {
-                self.advance();
-                self.expect(&Token::LParen)?;
-                let dir = self.parse_string()?;
-                self.expect(&Token::Comma)?;
-                let print = self.parse_bool()?;
-                self.expect(&Token::RParen)?;
-                Ok(Statement::LogInit { dir, print })
-            }
-            Token::Info => {
-                self.advance();
-                self.expect(&Token::LParen)?;
-                let msg = self.parse_string()?;
-                self.expect(&Token::RParen)?;
-                Ok(Statement::LogInfo(msg))
-            }
-            Token::Error => {
-                self.advance();
-                self.expect(&Token::LParen)?;
-                let error_ref = self.parse_identifier()?;
-                self.expect(&Token::RParen)?;
-                Ok(Statement::LogError(error_ref))
-            }
-            _ => Err(ParseError::new(1008, format!("无效的 LOG 类型: {}", log_type))),
-        }
-    }
-    
-    /// 解析 ERROR 定义
-    fn parse_error_def(&mut self) -> Result<Statement, ParseError> {
-        self.expect(&Token::Error)?;
-        let name = self.parse_identifier()?;
-        self.expect(&Token::LParen)?;
-        
-        // 简化实现：只解析 print 参数
-        let _print_label = self.parse_identifier()?; // "print"
-        self.expect(&Token::Colon)?;
-        let print_msg = self.parse_string()?;
-        
-        // 可选的其他参数
-        while self.match_token(&Token::Comma) {
-            self.advance();
-            let _param = self.parse_identifier()?;
-            self.expect(&Token::Colon)?;
-            let _type = self.parse_identifier()?;
-        }
-        
-        self.expect(&Token::RParen)?;
-        
-        Ok(Statement::ErrorDef { name, print: print_msg })
-    }
-    
-    /// 解析 DATA 相关语句
-    fn parse_data_statement(&mut self) -> Result<Statement, ParseError> {
-        self.expect(&Token::Data)?;
-        self.expect(&Token::Dot)?;
-        
-        let data_type = self.current().clone();
-        
-        match data_type {
-            Token::Do => {
-                self.advance();
-                self.expect(&Token::LParen)?;
-                let name = self.parse_identifier()?;
-                self.expect(&Token::Comma)?;
-                let file = self.parse_string()?;
-                self.expect(&Token::Comma)?;
-                let action = self.parse_identifier()?;
-                self.expect(&Token::RParen)?;
-                Ok(Statement::DataDo { name, file, action })
-            }
-            Token::Pipe => {
-                self.advance();
-                self.expect(&Token::Dot)?;
-                let name = self.parse_identifier()?;
-                self.expect(&Token::LParen)?;
-                
-                let mut operations = Vec::new();
-                while !self.match_token(&Token::RParen) {
-                    let op_ref = self.parse_identifier()?;
-                    
-                    // 判断是 do 还是 pipe 引用
-                    let operation = if op_ref.starts_with("do.") {
-                        PipeOperation::DoRef(op_ref)
-                    } else if op_ref.starts_with("pipe.") {
-                        PipeOperation::PipeRef(op_ref)
-                    } else {
-                        // 默认假设是 do 引用
-                        PipeOperation::DoRef(op_ref)
-                    };
-                    
-                    operations.push(operation);
-                    
-                    if !self.match_token(&Token::Comma) {
-                        break;
-                    }
-                    self.advance();
-                }
-                
-                self.expect(&Token::RParen)?;
-                Ok(Statement::DataPipe { name, operations })
-            }
-            Token::Re => {
-                self.advance();
-                self.expect(&Token::LParen)?;
-                let pattern = self.parse_string()?;
-                self.expect(&Token::RParen)?;
-                Ok(Statement::DataRe { pattern })
-            }
-            Token::Vali => {
-                // DATA.VALI.xxx(key, value)
-                self.advance();
-                self.expect(&Token::Dot)?;
-                let validator = self.parse_identifier()?;
-                self.expect(&Token::LParen)?;
-                let key = self.parse_identifier()?;
-                self.expect(&Token::Comma)?;
-                let value = self.parse_identifier()?;
-                self.expect(&Token::RParen)?;
-                Ok(Statement::DataVali { validator, key, value })
-            }
-            Token::Seria => {
-                // DATA.SERIA.JSON/BIN(value)
-                self.advance();
-                self.expect(&Token::Dot)?;
-                let format_token = self.current().clone();
-                let format = match format_token {
-                    Token::Json => {
-                        self.advance();
-                        SerializationFormat::Json
-                    }
-                    Token::Bin => {
-                        self.advance();
-                        SerializationFormat::Bin
-                    }
-                    _ => return Err(ParseError::new(1009, format!("无效的序列化格式: {}", format_token))),
-                };
-                self.expect(&Token::LParen)?;
-                let value = self.parse_identifier()?;
-                self.expect(&Token::RParen)?;
-                Ok(Statement::DataSeria { format, value })
-            }
-            Token::Deseria => {
-                // DATA.DESERIA.JSON/BIN(data)
-                self.advance();
-                self.expect(&Token::Dot)?;
-                let format_token = self.current().clone();
-                let format = match format_token {
-                    Token::Json => {
-                        self.advance();
-                        SerializationFormat::Json
-                    }
-                    Token::Bin => {
-                        self.advance();
-                        SerializationFormat::Bin
-                    }
-                    _ => return Err(ParseError::new(1009, format!("无效的反序列化格式: {}", format_token))),
-                };
-                self.expect(&Token::LParen)?;
-                let data = self.parse_identifier()?;
-                self.expect(&Token::RParen)?;
-                Ok(Statement::DataDeseria { format, data })
-            }
-            Token::Comp => {
-                // DATA.COMP(level, data) or DATA.COMP(data)
-                self.advance();
-                self.expect(&Token::LParen)?;
-                
-                // 尝试解析第一个参数
-                let first_arg = self.current().clone();
-                
-                // 检查是否有两个参数（level 和 data）
-                if let Token::Number(level) = first_arg {
-                    self.advance();
-                    self.expect(&Token::Comma)?;
-                    let data = self.parse_identifier()?;
-                    self.expect(&Token::RParen)?;
-                    Ok(Statement::DataComp { level: Some(level), data })
-                } else {
-                    // 只有一个参数（data），使用默认级别
-                    let data = self.parse_identifier()?;
-                    self.expect(&Token::RParen)?;
-                    Ok(Statement::DataComp { level: None, data })
-                }
-            }
-            Token::Decomp => {
-                // DATA.DECOMP(data)
-                self.advance();
-                self.expect(&Token::LParen)?;
-                let data = self.parse_identifier()?;
-                self.expect(&Token::RParen)?;
-                Ok(Statement::DataDecomp { data })
-            }
-            _ => Err(ParseError::new(1009, format!("无效的 DATA 类型: {}", data_type))),
-        }
-    }
-    
-    /// 解析 COMM 相关语句
-    fn parse_comm_statement(&mut self) -> Result<Statement, ParseError> {
-        self.expect(&Token::Comm)?;
-        self.expect(&Token::Dot)?;
-        
-        let comm_type = self.current().clone();
-        
-        match comm_type {
-            Token::Action => {
-                self.advance();
-                
-                // 可选的命名
-                let name = if self.match_token(&Token::Dot) {
-                    self.advance();
-                    Some(self.parse_identifier()?)
-                } else {
-                    None
-                };
-                
-                self.expect(&Token::LParen)?;
-                self.skip_newlines();
-                
-                let mut statements = Vec::new();
-                while !self.match_token(&Token::RParen) {
-                    if self.match_token(&Token::Newline) {
-                        self.advance();
-                        continue;
-                    }
-                    
-                    let stmt = self.parse_statement()?;
-                    statements.push(stmt);
-                    self.skip_newlines();
-                }
-                
-                self.expect(&Token::RParen)?;
-                Ok(Statement::CommAction { name, statements })
-            }
-            Token::Cmd => {
-                self.advance();
-                self.expect(&Token::LParen)?;
-                let exec = self.parse_string()?;
-                
-                let mut args = Vec::new();
-                while self.match_token(&Token::Comma) {
-                    self.advance();
-                    args.push(self.parse_string()?);
-                }
-                
-                self.expect(&Token::RParen)?;
-                Ok(Statement::CommCmd { exec, args })
-            }
-            Token::Ident(name) => {
-                let comm_name = name.clone();
-                self.advance();
-                self.expect(&Token::LParen)?;
-                let action_name = self.parse_identifier()?;
-                self.expect(&Token::RParen)?;
-                Ok(Statement::Comm { name: comm_name, action_name })
-            }
-            _ => Err(ParseError::new(1010, format!("无效的 COMM 类型: {}", comm_type))),
-        }
-    }
-    
-    /// 解析 PRINT 语句
+
     fn parse_print(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Print)?;
         self.expect(&Token::LParen)?;
-        let msg = self.parse_string()?;
+        let expr = self.parse_expr()?;
         self.expect(&Token::RParen)?;
-        Ok(Statement::Print(msg))
+        Ok(Statement::Print(expr))
     }
-    
-    /// 解析 DOING 语句
+
     fn parse_doing(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Doing)?;
-        self.expect(&Token::LParen)?;
-        let reference = self.parse_identifier()?;
-        self.expect(&Token::RParen)?;
-        Ok(Statement::Doing(reference))
+        Ok(Statement::Doing(self.parse_path()?))
     }
-    
-    /// 解析 AWAIT 语句
+
     fn parse_await(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Await)?;
-        self.expect(&Token::LParen)?;
-        
-        let mut references = Vec::new();
-        while !self.match_token(&Token::RParen) {
-            references.push(self.parse_identifier()?);
-            if !self.match_token(&Token::Comma) {
-                break;
-            }
+        let mut paths = vec![self.parse_path()?];
+        while self.current() == &Token::Comma {
             self.advance();
+            paths.push(self.parse_path()?);
         }
-        
-        self.expect(&Token::RParen)?;
-        Ok(Statement::Await(references))
+        Ok(Statement::Await(paths))
     }
-    
-    /// 解析 FILES 相关语句
-    fn parse_files_statement(&mut self) -> Result<Statement, ParseError> {
-        self.expect(&Token::Files)?;
-        
-        // 检查 FILES.ALL 或 FILES.ENCRY
-        if self.match_token(&Token::Dot) {
+
+    fn parse_url(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Url)?;
+        let name = self.parse_ident()?;
+        let address = self.expect_string()?;
+        Ok(Statement::Url { name, address })
+    }
+
+    fn parse_dir(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Dir)?;
+        let name = self.parse_ident()?;
+        let path = self.expect_string()?;
+        let mut suffix = None;
+        let mut deep = None;
+        let mut exclude = None;
+        while self.peek() == Some(&Token::Colon) {
+            let Some(key) = name_token(self.current()) else { break };
             self.advance();
-            let files_type = self.current().clone();
-            
-            match files_type {
-                Token::All => {
-                    self.advance();
-                    self.expect(&Token::LParen)?;
-                    
-                    // 解析 other:[string]
-                    let _other_label = self.parse_identifier()?; // "other"
-                    self.expect(&Token::Colon)?;
-                    let exclude = self.parse_string_list()?;
-                    
-                    self.expect(&Token::RParen)?;
-                    Ok(Statement::FilesAll { exclude })
-                }
-                Token::Encry => {
-                    self.advance();
-                    self.expect(&Token::LParen)?;
-                    self.expect(&Token::RParen)?;
-                    Ok(Statement::FilesEncry)
-                }
-                _ => Err(ParseError::new(1011, format!("无效的 FILES 类型: {}", files_type))),
+            self.advance();
+            let value = self.parse_expr()?;
+            match key.as_str() {
+                "suffix" if suffix.is_none() => suffix = Some(value),
+                "deep" if deep.is_none() => deep = Some(value),
+                "exclude" if exclude.is_none() => exclude = Some(value),
+                "suffix" | "deep" | "exclude" => return Err(self.fail(1004, format!("{key} 只能写一次"))),
+                _ => return Err(self.fail(1004, format!("dir 没有 {key}"))),
             }
+        }
+        Ok(Statement::Dir { name, path, suffix, deep, exclude })
+    }
+
+    fn parse_serve(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Serve)?;
+        self.expect(&Token::Colon)?;
+        let body = self.parse_block_body(true)?;
+        let mut routes = Vec::new();
+        for stmt in body {
+            match stmt {
+                Statement::At { .. } => {}
+                Statement::Route(route) => routes.push(route),
+                _ => return Err(self.fail(1001, "serve 里只能写 route")),
+            }
+        }
+        if routes.is_empty() {
+            return Err(self.fail(1001, "serve 至少要有一条 route"));
+        }
+        Ok(Statement::Serve { routes })
+    }
+
+    fn parse_route_stmt(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Route)?;
+        let source = self.parse_ident()?;
+        let pattern = if matches!(self.current(), Token::String(_)) {
+            Some(self.expect_string()?)
         } else {
-            // 普通 FILES(paths...)
-            self.expect(&Token::LParen)?;
-            self.skip_newlines();
-            
-            let mut paths = Vec::new();
-            while !self.match_token(&Token::RParen) {
-                if self.match_token(&Token::Newline) {
-                    self.advance();
-                    continue;
-                }
-                
-                let path_str = self.parse_string()?;
-                let file_path = FilePath::parse(&path_str);
-                
-                // 验证路径
-                file_path.validate()
-                    .map_err(|e| ParseError::new(1012, e.to_string()))?;
-                
-                paths.push(file_path);
-                
-                // 检查逗号分隔符
-                if !self.match_token(&Token::Comma) {
-                    break;
-                }
-                self.advance();
-                self.skip_newlines();
-            }
-            
-            self.skip_newlines(); // 跳过右括号前的换行
-            self.expect(&Token::RParen)?;
-            Ok(Statement::Files(paths))
-        }
+            None
+        };
+        let struct_name = self.parse_path()?;
+        let action = self.parse_path()?;
+        Ok(Statement::Route(RouteDecl { source, pattern, struct_name, action }))
     }
-    
-    /// 解析 CATCH 语句
+
     fn parse_catch(&mut self) -> Result<Statement, ParseError> {
         self.expect(&Token::Catch)?;
-        let error_name = self.parse_identifier()?;
+        let error_name = if self.current() == &Token::As {
+            None
+        } else {
+            Some(self.parse_ident()?)
+        };
+        self.expect(&Token::As)?;
+        let var = match self.current().clone() {
+            Token::Var(name) => {
+                self.advance();
+                name
+            }
+            Token::Ident(name) => {
+                self.advance();
+                name
+            }
+            _ => return Err(self.fail(1006, "catch 需要 as 变量")),
+        };
+        self.expect(&Token::Colon)?;
+        let body = self.parse_block_body(true)?;
+        let fail = if self.current() == &Token::Else {
+            self.advance();
+            self.expect(&Token::Colon)?;
+            self.parse_block_body(true)?
+        } else {
+            Vec::new()
+        };
+        Ok(Statement::Catch { error_name, var, body, fail })
+    }
+
+    fn parse_each(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Each)?;
+        let var = match self.current().clone() {
+            Token::Var(name) => {
+                self.advance();
+                name
+            }
+            _ => return Err(self.fail(1006, "each 需要 ${变量}")),
+        };
+        let index = if matches!(self.current(), Token::Ident(name) if name == "at") {
+            self.advance();
+            match self.current().clone() {
+                Token::Var(name) => {
+                    self.advance();
+                    Some(name)
+                }
+                _ => return Err(self.fail(1006, "each 的下标需要 ${变量}")),
+            }
+        } else {
+            None
+        };
+        self.expect(&Token::In)?;
+        let source = if matches!(self.current(), Token::Ident(name) if name == "files")
+            && self.peek() == Some(&Token::Colon)
+        {
+            self.advance();
+            EachSource::Files
+        } else {
+            EachSource::Expr(self.parse_expr()?)
+        };
+        self.expect(&Token::Colon)?;
+        let body = self.parse_block_body(true)?;
+        Ok(Statement::Each { var, index, source, body })
+    }
+
+    fn parse_error(&mut self) -> Result<Statement, ParseError> {
+        self.expect(&Token::Error)?;
+        let name = self.parse_ident()?;
         self.expect(&Token::Colon)?;
         self.skip_newlines();
-        
-        let statements = self.parse_block()?;
-        
-        Ok(Statement::Catch { error_name, statements })
+        self.expect(&Token::Indent)?;
+        self.skip_newlines();
+        let message = self.expect_string()?;
+        self.skip_newlines();
+        self.expect(&Token::Dedent)?;
+        Ok(Statement::ErrorDef { name, message })
     }
-    
-    /// 解析表达式
-    fn parse_expression(&mut self) -> Result<Expression, ParseError> {
-        self.parse_or_expression()
-    }
-    
-    fn parse_or_expression(&mut self) -> Result<Expression, ParseError> {
-        let mut left = self.parse_and_expression()?;
-        
-        while self.match_token(&Token::Or) {
+
+    fn parse_path(&mut self) -> Result<NamePath, ParseError> {
+        let mut parts = vec![self.parse_ident()?];
+        while self.current() == &Token::PathSep {
             self.advance();
-            let right = self.parse_and_expression()?;
-            left = Expression::Binary {
-                op: BinaryOp::Or,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
+            parts.push(self.parse_ident()?);
         }
-        
+        while self.current() == &Token::Dot {
+            self.advance();
+            parts.push(self.parse_ident()?);
+        }
+        let behavior = parts.pop().unwrap();
+        Ok(NamePath { modules: parts, behavior })
+    }
+
+    fn parse_module_path(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut parts = vec![self.parse_ident()?];
+        while self.current() == &Token::PathSep {
+            self.advance();
+            parts.push(self.parse_ident()?);
+        }
+        Ok(parts)
+    }
+
+    fn parse_arg_list(&mut self) -> Result<Vec<Arg>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut args = Vec::new();
+        if self.current() != &Token::RParen {
+            args.push(self.parse_arg()?);
+            while self.current() == &Token::Comma {
+                self.advance();
+                if self.current() == &Token::RParen {
+                    break;
+                }
+                args.push(self.parse_arg()?);
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(args)
+    }
+
+    fn parse_arg(&mut self) -> Result<Arg, ParseError> {
+        if self.peek() == Some(&Token::Colon) {
+            if let Some(name) = name_token(self.current()) {
+                self.advance();
+                self.advance();
+                let value = self.parse_expr()?;
+                return Ok(Arg::Named { name, value });
+            }
+        }
+        Ok(Arg::Pos(self.parse_expr()?))
+    }
+
+    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
+        self.parse_or()
+    }
+
+    fn parse_or(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_and()?;
+        while self.current() == &Token::Or {
+            self.advance();
+            left = Expr::Binary { op: BinaryOp::Or, left: Box::new(left), right: Box::new(self.parse_and()?) };
+        }
         Ok(left)
     }
-    
-    fn parse_and_expression(&mut self) -> Result<Expression, ParseError> {
-        let mut left = self.parse_comparison_expression()?;
-        
-        while self.match_token(&Token::And) {
+
+    fn parse_and(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_cmp()?;
+        while self.current() == &Token::And {
             self.advance();
-            let right = self.parse_comparison_expression()?;
-            left = Expression::Binary {
-                op: BinaryOp::And,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
+            left = Expr::Binary { op: BinaryOp::And, left: Box::new(left), right: Box::new(self.parse_cmp()?) };
         }
-        
         Ok(left)
     }
-    
-    fn parse_comparison_expression(&mut self) -> Result<Expression, ParseError> {
-        let mut left = self.parse_unary_expression()?;
-        
-        if let Some(op) = self.parse_comparison_op() {
+
+    fn parse_cmp(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_add()?;
+        if let Some(op) = self.cmp_op() {
             self.advance();
-            let right = self.parse_unary_expression()?;
-            left = Expression::Binary {
-                op,
-                left: Box::new(left),
-                right: Box::new(right),
-            };
+            left = Expr::Binary { op, left: Box::new(left), right: Box::new(self.parse_add()?) };
         }
-        
         Ok(left)
     }
-    
-    fn parse_unary_expression(&mut self) -> Result<Expression, ParseError> {
-        if self.match_token(&Token::Not) {
+
+    fn parse_add(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_mul()?;
+        while matches!(self.current(), Token::Plus | Token::Minus) {
+            let op = if self.current() == &Token::Plus { BinaryOp::Add } else { BinaryOp::Sub };
             self.advance();
-            let expr = self.parse_unary_expression()?;
-            return Ok(Expression::Unary {
-                op: UnaryOp::Not,
-                expr: Box::new(expr),
+            left = Expr::Binary { op, left: Box::new(left), right: Box::new(self.parse_mul()?) };
+        }
+        Ok(left)
+    }
+
+    fn parse_mul(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_unary()?;
+        while matches!(self.current(), Token::Star | Token::Slash) {
+            let op = if self.current() == &Token::Star { BinaryOp::Mul } else { BinaryOp::Div };
+            self.advance();
+            left = Expr::Binary { op, left: Box::new(left), right: Box::new(self.parse_unary()?) };
+        }
+        Ok(left)
+    }
+
+    fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        if self.current() == &Token::Not {
+            self.advance();
+            return Ok(Expr::Unary { op: UnaryOp::Not, expr: Box::new(self.parse_unary()?) });
+        }
+        if self.current() == &Token::Minus {
+            self.advance();
+            return Ok(Expr::Binary {
+                op: BinaryOp::Sub,
+                left: Box::new(Expr::Literal(Value::Number(0))),
+                right: Box::new(self.parse_unary()?),
             });
         }
-        
-        self.parse_primary_expression()
+        self.parse_primary()
     }
-    
-    fn parse_primary_expression(&mut self) -> Result<Expression, ParseError> {
-        let token = self.current().clone();
-        
-        match token {
+
+    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        let expr = self.parse_atom()?;
+        self.parse_postfix(expr)
+    }
+
+    fn parse_postfix(&mut self, mut expr: Expr) -> Result<Expr, ParseError> {
+        loop {
+            if self.current() == &Token::Dot {
+                self.advance();
+                let field = self.parse_ident()?;
+                expr = Expr::Field { record: Box::new(expr), field };
+            } else if self.current() == &Token::LBracket {
+                self.advance();
+                let start = self.parse_expr()?;
+                if self.current() == &Token::Colon {
+                    self.advance();
+                    let end = self.parse_expr()?;
+                    self.expect(&Token::RBracket)?;
+                    expr = Expr::Slice { base: Box::new(expr), start: Box::new(start), end: Box::new(end) };
+                } else {
+                    self.expect(&Token::RBracket)?;
+                    expr = Expr::Index { base: Box::new(expr), index: Box::new(start) };
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(expr)
+    }
+
+    fn parse_atom(&mut self) -> Result<Expr, ParseError> {
+        match self.current().clone() {
             Token::String(s) => {
                 self.advance();
-                Ok(Expression::Literal(Value::String(s)))
+                Ok(Expr::Literal(Value::String(self.interpolate_string_literal(&s))))
             }
             Token::Number(n) => {
                 self.advance();
-                Ok(Expression::Literal(Value::Number(n)))
+                Ok(Expr::Literal(Value::Number(n)))
+            }
+            Token::Float(n) => {
+                self.advance();
+                Ok(Expr::Literal(Value::Float(n)))
             }
             Token::Bool(b) => {
                 self.advance();
-                Ok(Expression::Literal(Value::Bool(b)))
+                Ok(Expr::Literal(Value::Bool(b)))
             }
-            Token::Ident(id) => {
+            Token::Var(name) => {
                 self.advance();
-                Ok(Expression::Variable(id))
+                Ok(Expr::Var(name))
+            }
+            Token::Num => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let inner = self.parse_expr()?;
+                self.expect(&Token::RParen)?;
+                Ok(Expr::Num(Box::new(inner)))
+            }
+            Token::Str => {
+                self.advance();
+                self.expect(&Token::LParen)?;
+                let inner = self.parse_expr()?;
+                self.expect(&Token::RParen)?;
+                Ok(Expr::Str(Box::new(inner)))
             }
             Token::LParen => {
                 self.advance();
-                let expr = self.parse_expression()?;
+                let expr = self.parse_expr()?;
                 self.expect(&Token::RParen)?;
                 Ok(expr)
             }
-            _ => Err(ParseError::new(1013, format!("意外的表达式 Token: {}", token))),
+            Token::LBracket => {
+                self.advance();
+                let mut items = Vec::new();
+                if self.current() != &Token::RBracket {
+                    items.push(self.parse_expr()?);
+                    while self.current() == &Token::Comma {
+                        self.advance();
+                        if self.current() == &Token::RBracket {
+                            break;
+                        }
+                        items.push(self.parse_expr()?);
+                    }
+                }
+                self.expect(&Token::RBracket)?;
+                Ok(Expr::Call {
+                    path: NamePath { modules: vec!["list".into()], behavior: "of".into() },
+                    args: items.into_iter().map(Arg::Pos).collect(),
+                })
+            }
+            Token::Ident(_) => {
+                let path = self.parse_path()?;
+                if self.current() != &Token::LParen {
+                    return Ok(Expr::Name(path));
+                }
+                self.expect(&Token::LParen)?;
+                let mut args = Vec::new();
+                if self.current() != &Token::RParen {
+                    args.push(self.parse_arg()?);
+                    while self.current() == &Token::Comma {
+                        self.advance();
+                        if self.current() == &Token::RParen {
+                            break;
+                        }
+                        args.push(self.parse_arg()?);
+                    }
+                }
+                self.expect(&Token::RParen)?;
+                Ok(Expr::Call { path, args })
+            }
+            other => Err(self.fail(1013, format!("意外的表达式: {other}"))),
         }
     }
-    
-    fn parse_comparison_op(&self) -> Option<BinaryOp> {
+
+    fn interpolate_string_literal(&self, raw: &str) -> String {
+        raw.to_string()
+    }
+
+    fn cmp_op(&self) -> Option<BinaryOp> {
         match self.current() {
             Token::Eq => Some(BinaryOp::Eq),
             Token::Ne => Some(BinaryOp::Ne),
@@ -872,244 +947,106 @@ impl Parser {
             _ => None,
         }
     }
-    
-    // 辅助解析方法
-    
-    fn parse_identifier(&mut self) -> Result<String, ParseError> {
-        let mut parts = Vec::new();
-        
-        match self.current() {
-            Token::Ident(id) => {
-                parts.push(id.clone());
-                self.advance();
-            }
-            // 处理可能作为标识符使用的关键字
-            Token::Error => {
-                parts.push("ERROR".to_string());
-                self.advance();
-            }
-            Token::Data => {
-                parts.push("DATA".to_string());
-                self.advance();
-            }
-            Token::Pipe => {
-                parts.push("PIPE".to_string());
-                self.advance();
-            }
-            Token::Do => {
-                parts.push("DO".to_string());
-                self.advance();
-            }
-            Token::Comm => {
-                parts.push("COMM".to_string());
-                self.advance();
-            }
-            Token::Action => {
-                parts.push("ACTION".to_string());
-                self.advance();
-            }
-            Token::Repo => {
-                parts.push("repo".to_string());
-                self.advance();
-            }
-            Token::Lib => {
-                parts.push("lib".to_string());
-                self.advance();
-            }
-            Token::Set => {
-                parts.push("set".to_string());
-                self.advance();
-            }
-            Token::Env => {
-                parts.push("env".to_string());
-                self.advance();
-            }
-            _ => {
-                return Err(ParseError::new(1014, format!("期望标识符，得到: {}", self.current())));
-            }
-        }
-        
-        // 处理限定标识符 (如 DATA.DO.name)
-        while self.match_token(&Token::Dot) {
-            self.advance(); // 消费 .
-            
-            match self.current() {
-                Token::Ident(id) => {
-                    parts.push(id.clone());
-                    self.advance();
-                }
-                Token::Do => {
-                    parts.push("DO".to_string());
-                    self.advance();
-                }
-                Token::Pipe => {
-                    parts.push("PIPE".to_string());
-                    self.advance();
-                }
-                Token::Action => {
-                    parts.push("ACTION".to_string());
-                    self.advance();
-                }
-                Token::Cmd => {
-                    parts.push("CMD".to_string());
-                    self.advance();
-                }
-                Token::Info => {
-                    parts.push("INFO".to_string());
-                    self.advance();
-                }
-                Token::Error => {
-                    parts.push("ERROR".to_string());
-                    self.advance();
-                }
-                _ => {
-                    return Err(ParseError::new(1014, format!("期望标识符部分，得到: {}", self.current())));
-                }
-            }
-        }
-        
-        Ok(parts.join("."))
-    }
-    
-    fn parse_string(&mut self) -> Result<String, ParseError> {
-        match self.current() {
-            Token::String(s) => {
-                let result = s.clone();
-                self.advance();
-                Ok(result)
-            }
-            _ => Err(ParseError::new(1015, format!("期望字符串，得到: {}", self.current()))),
-        }
-    }
-    
-    fn parse_number(&mut self) -> Result<i64, ParseError> {
-        match self.current() {
-            Token::Number(n) => {
-                let result = *n;
-                self.advance();
-                Ok(result)
-            }
-            _ => Err(ParseError::new(1016, format!("期望数字，得到: {}", self.current()))),
-        }
-    }
-    
-    fn parse_bool(&mut self) -> Result<bool, ParseError> {
-        match self.current() {
-            Token::Bool(b) => {
-                let result = *b;
-                self.advance();
-                Ok(result)
-            }
-            _ => Err(ParseError::new(1017, format!("期望布尔值，得到: {}", self.current()))),
-        }
-    }
-    
-    fn parse_value(&mut self) -> Result<Value, ParseError> {
-        match self.current() {
-            Token::String(s) => {
-                let result = Value::String(s.clone());
-                self.advance();
-                Ok(result)
-            }
-            Token::Number(n) => {
-                let result = Value::Number(*n);
-                self.advance();
-                Ok(result)
-            }
-            Token::Bool(b) => {
-                let result = Value::Bool(*b);
-                self.advance();
-                Ok(result)
-            }
-            Token::LBracket => {
-                self.advance();
-                let list = self.parse_value_list()?;
-                self.expect(&Token::RBracket)?;
-                Ok(Value::List(list))
-            }
-            _ => Err(ParseError::new(1018, format!("期望值，得到: {}", self.current()))),
-        }
-    }
-    
-    fn parse_value_list(&mut self) -> Result<Vec<Value>, ParseError> {
-        let mut values = Vec::new();
-        
-        while !self.match_token(&Token::RBracket) {
-            values.push(self.parse_value()?);
-            if !self.match_token(&Token::Comma) {
-                break;
-            }
-            self.advance();
-        }
-        
-        Ok(values)
-    }
-    
+
     fn parse_string_list(&mut self) -> Result<Vec<String>, ParseError> {
         self.expect(&Token::LBracket)?;
-        let mut strings = Vec::new();
-        
-        while !self.match_token(&Token::RBracket) {
-            strings.push(self.parse_string()?);
-            if !self.match_token(&Token::Comma) {
-                break;
+        let mut items = Vec::new();
+        if self.current() != &Token::RBracket {
+            items.push(self.expect_string()?);
+            while self.current() == &Token::Comma {
+                self.advance();
+                if self.current() == &Token::RBracket {
+                    break;
+                }
+                items.push(self.expect_string()?);
             }
-            self.advance();
         }
-        
         self.expect(&Token::RBracket)?;
-        Ok(strings)
+        Ok(items)
     }
-    
-    // Token 流操作
-    
-    fn is_at_end(&self) -> bool {
-        self.position >= self.tokens.len() || self.current() == &Token::Eof
+
+    fn parse_name(&mut self) -> Result<String, ParseError> {
+        if self.current() == &Token::Repo {
+            self.advance();
+            return Ok("repo".into());
+        }
+        if self.current() == &Token::Str {
+            self.advance();
+            return Ok("str".into());
+        }
+        self.parse_ident()
     }
-    
-    fn current(&self) -> &Token {
-        if self.position < self.tokens.len() {
-            &self.tokens[self.position]
-        } else {
-            &Token::Eof
+
+    fn parse_ident(&mut self) -> Result<String, ParseError> {
+        if let Some(name) = name_token(self.current()) {
+            self.advance();
+            return Ok(name);
+        }
+        Err(self.fail(1014, format!("期望标识符，得到: {}", self.current())))
+    }
+
+    fn expect_string(&mut self) -> Result<String, ParseError> {
+        match self.current().clone() {
+            Token::String(s) => {
+                self.advance();
+                Ok(s)
+            }
+            other => Err(self.fail(1015, format!("期望字符串，得到: {other}"))),
         }
     }
-    
-    fn advance(&mut self) -> &Token {
-        if !self.is_at_end() {
-            self.position += 1;
-        }
-        self.current()
-    }
-    
-    fn match_token(&self, token: &Token) -> bool {
-        if self.is_at_end() {
-            return false;
-        }
-        
-        // 使用模式匹配来比较 Token
-        match (self.current(), token) {
-            (Token::Ident(_), Token::Ident(_)) => false, // 标识符不能用 match_token
-            (a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
+
+    fn expect_number(&mut self) -> Result<i64, ParseError> {
+        match self.current().clone() {
+            Token::Number(n) => {
+                self.advance();
+                Ok(n)
+            }
+            other => Err(self.fail(1016, format!("期望数字，得到: {other}"))),
         }
     }
-    
+
     fn expect(&mut self, token: &Token) -> Result<(), ParseError> {
-        if self.match_token(token) {
+        if self.current() == token {
             self.advance();
             Ok(())
         } else {
-            Err(ParseError::new(
-                1019,
-                format!("期望 {}，得到: {}", token, self.current()),
-            ))
+            Err(self.fail(1017, format!("期望 {token:?}，得到 {}", self.current())))
         }
     }
-    
+
+    fn place(&self) -> (u32, u32) {
+        self.spans.get(self.position).copied().unwrap_or((1, 1))
+    }
+
+    fn fail(&self, code: u32, message: impl Into<String>) -> ParseError {
+        let message = message.into();
+        let (line, column) = self.place();
+        let hint = crate::dsl::diagnose::hint(code, &message);
+        ParseError::new(code, message).at(line, column, hint)
+    }
+
+    fn current(&self) -> &Token {
+        self.tokens.get(self.position).unwrap_or(&Token::Eof)
+    }
+
+    fn peek(&self) -> Option<&Token> {
+        self.tokens.get(self.position + 1)
+    }
+
+    fn advance(&mut self) {
+        if self.position < self.tokens.len() {
+            self.position += 1;
+        }
+    }
+
     fn skip_newlines(&mut self) {
-        while self.match_token(&Token::Newline) {
+        while matches!(self.current(), Token::Newline | Token::Comment(_)) {
             self.advance();
         }
+    }
+
+    fn is_at_end(&self) -> bool {
+        self.position >= self.tokens.len()
     }
 }
 
@@ -1118,274 +1055,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_set() {
-        let mut parser = Parser::new("set(KEY, \"value\")").expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        assert!(matches!(ast.statements[0], Statement::Set { .. }));
+    fn parses_action_and_pipe() {
+        let src = "action clean(file):\n    print(${file})\n\npipe process:\n    clean\n";
+        let mut parser = Parser::new(src).unwrap();
+        let ast = parser.parse().unwrap();
+        let stmts: Vec<_> = ast.statements.iter().filter(|stmt| !matches!(stmt, Statement::At { .. })).collect();
+        assert!(matches!(stmts[0], Statement::Action { .. }));
+        assert!(matches!(stmts[1], Statement::Pipe { .. }));
     }
 
     #[test]
-    fn test_parse_set_env() {
-        let mut parser = Parser::new("set.env(PATH, \"/usr/bin\")").expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        assert!(matches!(ast.statements[0], Statement::SetEnv { .. }));
+    fn parses_use_and_qualified_path() {
+        let src = "use \"rules/csv.dake\" as tools::pack\ndoing tools::pack.seal\n";
+        let mut parser = Parser::new(src).unwrap();
+        let ast = parser.parse().unwrap();
+        let stmts: Vec<_> = ast.statements.iter().filter(|stmt| !matches!(stmt, Statement::At { .. })).collect();
+        assert!(matches!(stmts[0], Statement::Use { .. }));
+        match stmts[1] {
+            Statement::Doing(path) => {
+                assert_eq!(path.modules, vec!["tools", "pack"]);
+                assert_eq!(path.behavior, "seal");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
     }
 
     #[test]
-    fn test_parse_print() {
-        let mut parser = Parser::new("PRINT(\"Hello World\")").expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        assert!(matches!(ast.statements[0], Statement::Print(_)));
-    }
-
-    #[test]
-    fn test_parse_control_flow() {
-        let input = r#"
-IF true:
-    PRINT("true")
-ELSE:
-    PRINT("false")
-"#;
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        assert!(matches!(ast.statements[0], Statement::ControlFlow(_)));
-    }
-
-    #[test]
-    fn test_parse_files() {
-        let mut parser = Parser::new(r#"FILES("path/to/file.txt", "${VAR}/file.txt")"#)
-            .expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        assert!(matches!(ast.statements[0], Statement::Files(_)));
-    }
-    
-    #[test]
-    fn test_parse_lib_complete() {
-        let input = r#"lib
-    name:"test"
-    version:"1.0.0"
-    desc:"test desc"
-    repo:"https://example.com"
-    keywords:["test"]
-    readme:"README.md"
-    out_dir:"./out"
-"#;
-        
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let result = parser.parse();
-        
-        match &result {
-            Ok(a) => {
-                assert_eq!(a.statements.len(), 1);
-                assert!(matches!(a.statements[0], Statement::Lib(_)));
-            }
-            Err(e) => {
-                panic!("Failed to parse lib: {}", e);
-            }
-        }
-    }
-    
-    #[test]
-    fn test_parse_data_re() {
-        let input = r#"DATA.RE("\\d+")"#;
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        
-        match &ast.statements[0] {
-            Statement::DataRe { pattern } => {
-                assert_eq!(pattern, r"\d+");
-            }
-            _ => panic!("Expected DataRe statement"),
-        }
-    }
-    
-    #[test]
-    fn test_parse_data_re_complex() {
-        let input = r#"DATA.RE("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$")"#;
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        
-        match &ast.statements[0] {
-            Statement::DataRe { pattern } => {
-                assert_eq!(pattern, r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$");
-            }
-            _ => panic!("Expected DataRe statement"),
-        }
-    }
-    
-    #[test]
-    fn test_parse_data_vali() {
-        let input = "DATA.VALI.not_null(username, value)";
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        
-        match &ast.statements[0] {
-            Statement::DataVali { validator, key, value } => {
-                assert_eq!(validator, "not_null");
-                assert_eq!(key, "username");
-                assert_eq!(value, "value");
-            }
-            _ => panic!("Expected DataVali statement"),
-        }
-    }
-    
-    #[test]
-    fn test_parse_data_seria_json() {
-        let input = "DATA.SERIA.JSON(mydata)";
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        
-        match &ast.statements[0] {
-            Statement::DataSeria { format, value } => {
-                assert_eq!(*format, SerializationFormat::Json);
-                assert_eq!(value, "mydata");
-            }
-            _ => panic!("Expected DataSeria statement"),
-        }
-    }
-    
-    #[test]
-    fn test_parse_data_seria_bin() {
-        let input = "DATA.SERIA.BIN(mydata)";
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        
-        match &ast.statements[0] {
-            Statement::DataSeria { format, value } => {
-                assert_eq!(*format, SerializationFormat::Bin);
-                assert_eq!(value, "mydata");
-            }
-            _ => panic!("Expected DataSeria statement"),
-        }
-    }
-    
-    #[test]
-    fn test_parse_data_deseria_json() {
-        let input = "DATA.DESERIA.JSON(rawdata)";
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        
-        match &ast.statements[0] {
-            Statement::DataDeseria { format, data } => {
-                assert_eq!(*format, SerializationFormat::Json);
-                assert_eq!(data, "rawdata");
-            }
-            _ => panic!("Expected DataDeseria statement"),
-        }
-    }
-    
-    #[test]
-    fn test_parse_data_comp_with_level() {
-        let input = "DATA.COMP(3, mydata)";
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        
-        match &ast.statements[0] {
-            Statement::DataComp { level, data } => {
-                assert_eq!(*level, Some(3));
-                assert_eq!(data, "mydata");
-            }
-            _ => panic!("Expected DataComp statement"),
-        }
-    }
-    
-    #[test]
-    fn test_parse_data_comp_without_level() {
-        let input = "DATA.COMP(mydata)";
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        
-        match &ast.statements[0] {
-            Statement::DataComp { level, data } => {
-                assert_eq!(*level, None);
-                assert_eq!(data, "mydata");
-            }
-            _ => panic!("Expected DataComp statement"),
-        }
-    }
-    
-    #[test]
-    fn test_parse_data_decomp() {
-        let input = "DATA.DECOMP(compressed)";
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        assert_eq!(ast.statements.len(), 1);
-        
-        match &ast.statements[0] {
-            Statement::DataDecomp { data } => {
-                assert_eq!(data, "compressed");
-            }
-            _ => panic!("Expected DataDecomp statement"),
-        }
-    }
-    
-    #[test]
-    fn test_if_block_terminator() {
-        // 测试 IF 块后紧跟 SET 等结构性关键字，确保正确终止块
-        let input = r#"
-IF true:
-    PRINT("inside if")
-set(VAR, "value")
-"#;
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        
-        // 应该有两个顶层语句：IF 和 SET
-        assert_eq!(ast.statements.len(), 2);
-        
-        // 第一个语句是 IF
-        match &ast.statements[0] {
-            Statement::ControlFlow(cf) => {
-                // IF 块内只有一个 PRINT
-                assert_eq!(cf.if_branch.1.len(), 1);
-                assert!(matches!(cf.if_branch.1[0], Statement::Print(_)));
-            }
-            _ => panic!("Expected ControlFlow statement"),
-        }
-        
-        // 第二个语句是顶层 SET
-        assert!(matches!(ast.statements[1], Statement::Set { .. }));
-    }
-    
-    #[test]
-    fn test_if_block_with_multiple_statements() {
-        // 测试 IF 块内有多个语句的情况（带 ELSE）
-        let input = r#"
-IF true:
-    PRINT("first")
-    PRINT("second")
-    PRINT("third")
-ELSE:
-    PRINT("else branch")
-"#;
-        let mut parser = Parser::new(input).expect("Failed to create parser");
-        let ast = parser.parse().expect("Failed to parse");
-        
-        // 应该有一个顶层语句（IF-ELSE）
-        assert_eq!(ast.statements.len(), 1);
-        
-        // 语句是 ControlFlow
-        match &ast.statements[0] {
-            Statement::ControlFlow(cf) => {
-                // IF 块包含三个语句
-                assert_eq!(cf.if_branch.1.len(), 3);
-                // ELSE 块包含一个语句
-                assert_eq!(cf.else_branch.as_ref().unwrap().len(), 1);
-            }
-            _ => panic!("Expected ControlFlow statement"),
-        }
+    fn if_block_stops_at_dedent() {
+        let src = "if ${ok}:\n    print(\"yes\")\nprint(\"after\")\n";
+        let mut parser = Parser::new(src).unwrap();
+        let ast = parser.parse().unwrap();
+        let stmts: Vec<_> = ast.statements.iter().filter(|stmt| !matches!(stmt, Statement::At { .. })).collect();
+        assert_eq!(stmts.len(), 2);
     }
 }

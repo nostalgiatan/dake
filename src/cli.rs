@@ -5,85 +5,57 @@
  */
 
 use std::path::Path;
-use std::fs;
-use crate::dsl::Parser;
+use crate::dsl::compile::compile_path;
+use crate::dsl::parser::Parser;
+use crate::executor::preflight;
 use crate::executor::Executor;
+use std::fs;
 
 /// 运行 DSL 文件
 pub fn run_file(file: &Path, verbose: bool) {
-    match fs::read_to_string(file) {
-        Ok(content) => {
+    let compiled = match compile_path(file) {
+        Ok(compiled) => compiled,
+        Err(e) => {
+            eprintln!("✗ 编译失败: {e}");
+            std::process::exit(1);
+        }
+    };
+    if verbose {
+        println!("读取文件: {}", file.display());
+        println!("解析成功，包含 {} 个语句", compiled.statement_count);
+    }
+    if let Err(e) = preflight::check_image(&compiled.image) {
+        eprintln!("✗ 预测试失败:\n{e}");
+        std::process::exit(1);
+    }
+    let mut executor = Executor::new();
+    match executor.execute_ir(&compiled.program) {
+        Ok(()) => {
             if verbose {
-                println!("读取文件: {}", file.display());
-            }
-            
-            match Parser::new(&content) {
-                Ok(mut parser) => {
-                    match parser.parse() {
-                        Ok(ast) => {
-                            if verbose {
-                                println!("解析成功，包含 {} 个语句", ast.statements.len());
-                            }
-                            
-                            // 执行 AST
-                            let mut executor = Executor::new();
-                            match executor.execute(&ast) {
-                                Ok(()) => {
-                                    if verbose {
-                                        println!("✓ 执行成功");
-                                    }
-                                }
-                                Err(e) => {
-                                    eprintln!("✗ 执行错误: {}", e);
-                                    std::process::exit(1);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("✗ 解析错误: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("✗ 创建解析器失败: {}", e);
-                    std::process::exit(1);
-                }
+                println!("✓ 执行成功");
             }
         }
         Err(e) => {
-            eprintln!("✗ 读取文件失败: {}", e);
+            eprintln!("✗ 执行错误: {}", e);
             std::process::exit(1);
         }
     }
 }
 
-/// 检查 DSL 文件语法
+/// 检查 DSL 文件：语法、use 和降到中间表示
 pub fn check_file(file: &Path) {
-    match fs::read_to_string(file) {
-        Ok(content) => {
-            match Parser::new(&content) {
-                Ok(mut parser) => {
-                    match parser.parse() {
-                        Ok(ast) => {
-                            println!("✓ 语法检查通过");
-                            println!("  文件: {}", file.display());
-                            println!("  语句数: {}", ast.statements.len());
-                        }
-                        Err(e) => {
-                            eprintln!("✗ 语法错误: {}", e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                Err(e) => {
-                    eprintln!("✗ 词法分析失败: {}", e);
-                    std::process::exit(1);
-                }
+    match compile_path(file) {
+        Ok(compiled) => {
+            if let Err(e) = preflight::check_image(&compiled.image) {
+                eprintln!("✗ {e}");
+                std::process::exit(1);
             }
+            println!("✓ 检查通过");
+            println!("  文件: {}", file.display());
+            println!("  语句数: {}", compiled.statement_count);
         }
         Err(e) => {
-            eprintln!("✗ 读取文件失败: {}", e);
+            eprintln!("✗ {e}");
             std::process::exit(1);
         }
     }

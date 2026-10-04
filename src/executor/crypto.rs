@@ -42,6 +42,7 @@ impl std::error::Error for CryptoError {}
 
 /// 加密操作
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct CryptoOperations {
     /// 密钥（32 字节）
     key: [u8; 32],
@@ -97,6 +98,11 @@ impl CryptoOperations {
         })
     }
     
+    /// 本次使用的密钥字节
+    pub fn key_bytes(&self) -> &[u8; 32] {
+        &self.key
+    }
+
     /// 加密数据
     ///
     /// # 参数

@@ -144,6 +144,10 @@ pub struct ErrorInfo {
     severity: ErrorSeverity,
     /// 错误类别
     category: ErrorCategory,
+    /// 源文件、行、列。文件名可为空。
+    place: Option<(String, u32, u32)>,
+    /// 修复建议
+    hint: Option<String>,
 }
 
 impl ErrorInfo {
@@ -169,6 +173,8 @@ impl ErrorInfo {
             context: Vec::new(),
             severity: ErrorSeverity::Error,
             category: ErrorCategory::Other,
+            place: None,
+            hint: None,
         }
     }
     
@@ -196,6 +202,8 @@ impl ErrorInfo {
             context: Vec::new(),
             severity: ErrorSeverity::Error,
             category: ErrorCategory::Other,
+            place: None,
+            hint: None,
         }
     }
     
@@ -262,6 +270,16 @@ impl ErrorInfo {
         self.category = category;
         self
     }
+
+    pub fn with_place(mut self, file: impl Into<String>, line: u32, column: u32) -> Self {
+        self.place = Some((file.into(), line, column));
+        self
+    }
+
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
+        self
+    }
     
     /// 获取错误码
     pub fn code(&self) -> u32 {
@@ -317,6 +335,16 @@ impl fmt::Display for ErrorInfo {
         // 显示源错误
         if let Some(source) = &self.source {
             write!(f, "\n  由以下错误引起: {}", source)?;
+        }
+        if let Some((file, line, column)) = &self.place {
+            if file.is_empty() {
+                write!(f, "\n  位置: {line}:{column}")?;
+            } else {
+                write!(f, "\n  位置: {file}:{line}:{column}")?;
+            }
+        }
+        if let Some(hint) = &self.hint {
+            write!(f, "\n  建议: {hint}")?;
         }
         Ok(())
     }

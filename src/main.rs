@@ -66,8 +66,5 @@ fn main() {
     }
 }
 
-// 测试模块
 #[cfg(test)]
-mod tests {
-    // DSL 测试在各自的模块中
-}
+mod lang_tests;

@@ -1,16 +1,15 @@
 /*
- * 词法分析器 (Lexer)
+ * 词法分析器
  *
- * 将 DSL 源代码转换为 Token 流。
- * 使用显式状态管理，避免隐式转换。
+ * 关键字一律小写。`::` 与 `:` 分开。
+ * 行首空格变成 Indent / Dedent，空行和整行注释不产生缩进。
  */
 
+use std::collections::VecDeque;
 use std::fmt;
 
-/// Token 类型
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
-    // 关键字
     Set,
     Env,
     If,
@@ -18,64 +17,55 @@ pub enum Token {
     Else,
     Lib,
     Repo,
-    Log,
-    Init,
-    Info,
-    Error,
-    Data,
-    Do,
-    Pipe,
-    Re,
-    Comm,
+    Use,
     Action,
-    Cmd,
+    Struct,
+    Pipe,
+    Each,
+    As,
+    In,
     Print,
     Doing,
     Await,
-    Files,
-    All,
-    Encry,
+    Url,
+    Dir,
+    Serve,
+    Route,
     Catch,
-    Vali,       // 新增：验证
-    Seria,      // 新增：序列化
-    Deseria,    // 新增：反序列化
-    Comp,       // 新增：压缩
-    Decomp,     // 新增：解压缩
-    Json,       // 新增：JSON
-    Bin,        // 新增：二进制
-    
-    // 字面量
+    Stop,
+    Error,
+    Num,
+    Str,
     String(String),
     Number(i64),
+    Float(f64),
     Bool(bool),
     Ident(String),
-    
-    // 符号
-    LParen,        // (
-    RParen,        // )
-    LBrace,        // {
-    RBrace,        // }
-    LBracket,      // [
-    RBracket,      // ]
-    Colon,         // :
-    Comma,         // ,
-    Dot,           // .
-    Arrow,         // =>
-    
-    // 操作符
-    Eq,            // ==
-    Ne,            // !=
-    Gt,            // >
-    Lt,            // <
-    Ge,            // >=
-    Le,            // <=
-    And,           // &&
-    Or,            // ||
-    Not,           // !
-    Assign,        // =
-    
-    // 特殊
+    Var(String),
+    LParen,
+    RParen,
+    LBracket,
+    RBracket,
+    Colon,
+    PathSep,
+    Comma,
+    Dot,
+    Eq,
+    Ne,
+    Gt,
+    Lt,
+    Ge,
+    Le,
+    And,
+    Or,
+    Not,
+    Plus,
+    Minus,
+    Star,
+    Slash,
     Newline,
+    Indent,
+    Dedent,
     Eof,
     Comment(String),
 }
@@ -83,266 +73,265 @@ pub enum Token {
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Token::Set => write!(f, "set"),
-            Token::Env => write!(f, "env"),
-            Token::If => write!(f, "IF"),
-            Token::Elif => write!(f, "ELIF"),
-            Token::Else => write!(f, "ELSE"),
-            Token::String(s) => write!(f, "\"{}\"", s),
-            Token::Number(n) => write!(f, "{}", n),
-            Token::Bool(b) => write!(f, "{}", b),
-            Token::Ident(s) => write!(f, "{}", s),
-            Token::LParen => write!(f, "("),
-            Token::RParen => write!(f, ")"),
-            Token::Comma => write!(f, ","),
-            Token::Dot => write!(f, "."),
-            Token::Colon => write!(f, ":"),
-            Token::Newline => write!(f, "\\n"),
-            Token::Eof => write!(f, "EOF"),
-            Token::Comment(s) => write!(f, "# {}", s),
-            _ => write!(f, "{:?}", self),
+            Token::Ident(s) => write!(f, "{s}"),
+            Token::String(s) => write!(f, "\"{s}\""),
+            Token::Var(s) => write!(f, "${{{s}}}"),
+            Token::Number(n) => write!(f, "{n}"),
+            Token::Float(n) => write!(f, "{n}"),
+            Token::Bool(b) => write!(f, "{b}"),
+            other => write!(f, "{other:?}"),
         }
     }
 }
 
-/// 词法分析器
 pub struct Lexer {
     input: Vec<char>,
     position: usize,
     line: usize,
     column: usize,
+    at_bol: bool,
+    indent_stack: Vec<usize>,
+    pending: VecDeque<(Token, u32, u32)>,
+    span: (u32, u32),
 }
 
 impl Lexer {
-    /// 创建新的词法分析器
-    ///
-    /// # 参数
-    /// - `input`: DSL 源代码字符串
     pub fn new(input: &str) -> Self {
         Self {
             input: input.chars().collect(),
             position: 0,
             line: 1,
             column: 1,
+            at_bol: true,
+            indent_stack: vec![0],
+            pending: VecDeque::new(),
+            span: (1, 1),
         }
     }
-    
-    /// 获取下一个 Token
-    ///
-    /// # 返回值
-    /// - `Ok(Token)`: 成功解析的 Token
-    /// - `Err(String)`: 词法错误信息
-    pub fn next_token(&mut self) -> Result<Token, String> {
-        self.skip_whitespace_except_newline();
-        
-        if self.is_at_end() {
-            return Ok(Token::Eof);
+
+    pub fn tokenize(&mut self) -> Result<Vec<(Token, u32, u32)>, String> {
+        let mut tokens = Vec::new();
+        loop {
+            let token = self.next_token()?;
+            let span = self.span;
+            let done = token == Token::Eof;
+            tokens.push((token, span.0, span.1));
+            if done {
+                break;
+            }
         }
-        
+        Ok(tokens)
+    }
+
+    pub fn next_token(&mut self) -> Result<Token, String> {
+        if let Some((token, line, column)) = self.pending.pop_front() {
+            self.span = (line, column);
+            return Ok(token);
+        }
+        if self.at_bol {
+            self.scan_indent()?;
+            self.at_bol = false;
+            if let Some((token, line, column)) = self.pending.pop_front() {
+                self.span = (line, column);
+                return Ok(token);
+            }
+        }
+        self.skip_spaces();
+        self.span = (self.line as u32, self.column as u32);
+        if self.is_at_end() {
+            self.emit_closing_dedents();
+            return Ok(self.pending.pop_front().map(|(token, line, column)| {
+                self.span = (line, column);
+                token
+            }).unwrap_or(Token::Eof));
+        }
         let ch = self.current_char();
-        
-        // 注释
         if ch == '#' {
             return self.scan_comment();
         }
-        
-        // 换行符
         if ch == '\n' {
             self.advance();
             self.line += 1;
             self.column = 1;
+            self.at_bol = true;
             return Ok(Token::Newline);
         }
-        
-        // 字符串字面量
         if ch == '"' || ch == '\'' {
             return self.scan_string(ch);
         }
-        
-        // 数字
-        if ch.is_ascii_digit() || (ch == '-' && self.peek().map_or(false, |c| c.is_ascii_digit())) {
-            return self.scan_number();
+        if ch == '$' {
+            return self.scan_var();
         }
-        
-        // 标识符或关键字
+        if ch.is_ascii_digit() {
+            return self.scan_number(false);
+        }
         if ch.is_alphabetic() || ch == '_' {
             return self.scan_identifier();
         }
-        
-        // 符号和操作符
-        match ch {
-            '(' => {
-                self.advance();
-                Ok(Token::LParen)
+        self.scan_symbol(ch)
+    }
+
+    fn scan_indent(&mut self) -> Result<(), String> {
+        let mut spaces = 0usize;
+        loop {
+            if self.is_at_end() {
+                self.emit_closing_dedents();
+                return Ok(());
             }
-            ')' => {
-                self.advance();
-                Ok(Token::RParen)
+            match self.current_char() {
+                ' ' => {
+                    spaces += 1;
+                    self.advance();
+                }
+                '\t' => {
+                    return Err(format!("第 {} 行: 不允许用制表符缩进", self.line));
+                }
+                '\n' => {
+                    self.advance();
+                    self.line += 1;
+                    self.column = 1;
+                    spaces = 0;
+                }
+                '#' => {
+                    while !self.is_at_end() && self.current_char() != '\n' {
+                        self.advance();
+                    }
+                }
+                _ => break,
             }
-            '{' => {
-                self.advance();
-                Ok(Token::LBrace)
-            }
-            '}' => {
-                self.advance();
-                Ok(Token::RBrace)
-            }
-            '[' => {
-                self.advance();
-                Ok(Token::LBracket)
-            }
-            ']' => {
-                self.advance();
-                Ok(Token::RBracket)
-            }
+        }
+        let current = *self.indent_stack.last().unwrap_or(&0);
+        if spaces == current {
+            return Ok(());
+        }
+        if spaces > current {
+            self.indent_stack.push(spaces);
+            self.pending.push_back((Token::Indent, self.line as u32, 1));
+            return Ok(());
+        }
+        while self.indent_stack.last().copied().unwrap_or(0) > spaces {
+            self.indent_stack.pop();
+            self.pending.push_back((Token::Dedent, self.line as u32, 1));
+        }
+        if self.indent_stack.last().copied() != Some(spaces) {
+            return Err(format!("第 {} 行: 缩进与外层不一致", self.line));
+        }
+        Ok(())
+    }
+
+    fn emit_closing_dedents(&mut self) {
+        while self.indent_stack.len() > 1 {
+            self.indent_stack.pop();
+            self.pending.push_back((Token::Dedent, self.line as u32, 1));
+        }
+        self.pending.push_back((Token::Eof, self.line as u32, self.column as u32));
+    }
+
+    fn scan_symbol(&mut self, ch: char) -> Result<Token, String> {
+        self.advance();
+        let token = match ch {
+            '(' => Token::LParen,
+            ')' => Token::RParen,
+            '[' => Token::LBracket,
+            ']' => Token::RBracket,
+            ',' => Token::Comma,
+            '.' => Token::Dot,
+            '+' => Token::Plus,
+            '*' => Token::Star,
+            '/' => Token::Slash,
             ':' => {
-                self.advance();
-                Ok(Token::Colon)
+                if self.current_char() == ':' {
+                    self.advance();
+                    Token::PathSep
+                } else {
+                    Token::Colon
+                }
             }
-            ',' => {
-                self.advance();
-                Ok(Token::Comma)
-            }
-            '.' => {
-                self.advance();
-                Ok(Token::Dot)
+            '-' => {
+                if self.current_char().is_ascii_digit() {
+                    return self.scan_number(true);
+                }
+                Token::Minus
             }
             '=' => {
-                self.advance();
                 if self.current_char() == '=' {
                     self.advance();
-                    Ok(Token::Eq)
-                } else if self.current_char() == '>' {
-                    self.advance();
-                    Ok(Token::Arrow)
+                    Token::Eq
                 } else {
-                    Ok(Token::Assign)
+                    return Err(format!("第 {} 行第 {} 列: 不支持单独的 =", self.line, self.column));
                 }
             }
             '!' => {
-                self.advance();
                 if self.current_char() == '=' {
                     self.advance();
-                    Ok(Token::Ne)
+                    Token::Ne
                 } else {
-                    Ok(Token::Not)
+                    Token::Not
                 }
             }
             '>' => {
-                self.advance();
                 if self.current_char() == '=' {
                     self.advance();
-                    Ok(Token::Ge)
+                    Token::Ge
                 } else {
-                    Ok(Token::Gt)
+                    Token::Gt
                 }
             }
             '<' => {
-                self.advance();
                 if self.current_char() == '=' {
                     self.advance();
-                    Ok(Token::Le)
+                    Token::Le
                 } else {
-                    Ok(Token::Lt)
+                    Token::Lt
                 }
             }
             '&' => {
-                self.advance();
                 if self.current_char() == '&' {
                     self.advance();
-                    Ok(Token::And)
+                    Token::And
                 } else {
-                    Err(format!("第 {} 行第 {} 列: 意外的字符 '&'", self.line, self.column))
+                    return Err(format!("第 {} 行: 意外的字符 '&'", self.line));
                 }
             }
             '|' => {
-                self.advance();
                 if self.current_char() == '|' {
                     self.advance();
-                    Ok(Token::Or)
+                    Token::Or
                 } else {
-                    Err(format!("第 {} 行第 {} 列: 意外的字符 '|'", self.line, self.column))
+                    return Err(format!("第 {} 行: 意外的字符 '|'", self.line));
                 }
             }
-            _ => Err(format!("第 {} 行第 {} 列: 未知字符 '{}'", self.line, self.column, ch))
+            _ => return Err(format!("第 {} 行第 {} 列: 未知字符 '{ch}'", self.line, self.column)),
+        };
+        Ok(token)
+    }
+
+    fn scan_var(&mut self) -> Result<Token, String> {
+        self.advance();
+        if self.current_char() != '{' {
+            return Err(format!("第 {} 行: 变量必须以 ${{ 开始", self.line));
         }
-    }
-    
-    /// 扫描所有 Token
-    pub fn tokenize(&mut self) -> Result<Vec<Token>, String> {
-        let mut tokens = Vec::new();
-        
-        loop {
-            let token = self.next_token()?;
-            if token == Token::Eof {
-                tokens.push(token);
-                break;
-            }
-            tokens.push(token);
+        self.advance();
+        let mut name = String::new();
+        while !self.is_at_end() && (self.current_char().is_alphanumeric() || self.current_char() == '_') {
+            name.push(self.advance());
         }
-        
-        Ok(tokens)
-    }
-    
-    // 内部辅助方法
-    
-    fn is_at_end(&self) -> bool {
-        self.position >= self.input.len()
-    }
-    
-    fn current_char(&self) -> char {
-        if self.is_at_end() {
-            '\0'
-        } else {
-            self.input[self.position]
+        if name.is_empty() || self.current_char() != '}' {
+            return Err(format!("第 {} 行: 变量未闭合", self.line));
         }
+        self.advance();
+        Ok(Token::Var(name))
     }
-    
-    fn peek(&self) -> Option<char> {
-        if self.position + 1 < self.input.len() {
-            Some(self.input[self.position + 1])
-        } else {
-            None
-        }
-    }
-    
-    fn advance(&mut self) -> char {
-        let ch = self.current_char();
-        self.position += 1;
-        self.column += 1;
-        ch
-    }
-    
-    fn skip_whitespace_except_newline(&mut self) {
-        while !self.is_at_end() {
-            let ch = self.current_char();
-            if ch == ' ' || ch == '\t' || ch == '\r' {
-                self.advance();
-            } else {
-                break;
-            }
-        }
-    }
-    
-    fn scan_comment(&mut self) -> Result<Token, String> {
-        self.advance(); // 跳过 '#'
-        let mut comment = String::new();
-        
-        while !self.is_at_end() && self.current_char() != '\n' {
-            comment.push(self.advance());
-        }
-        
-        Ok(Token::Comment(comment.trim().to_string()))
-    }
-    
+
     fn scan_string(&mut self, quote: char) -> Result<Token, String> {
-        self.advance(); // 跳过开始引号
+        self.advance();
         let mut value = String::new();
-        
         while !self.is_at_end() && self.current_char() != quote {
             let ch = self.advance();
-            if ch == '\\' && !self.is_at_end() {
-                // 转义字符
+            if ch == '\\' {
+                if self.is_at_end() {
+                    break;
+                }
                 let escaped = self.advance();
                 match escaped {
                     'n' => value.push('\n'),
@@ -351,6 +340,7 @@ impl Lexer {
                     '\\' => value.push('\\'),
                     '"' => value.push('"'),
                     '\'' => value.push('\''),
+                    '$' => value.push('$'),
                     _ => {
                         value.push('\\');
                         value.push(escaped);
@@ -360,35 +350,39 @@ impl Lexer {
                 value.push(ch);
             }
         }
-        
         if self.is_at_end() {
-            return Err(format!("第 {} 行第 {} 列: 字符串未闭合", self.line, self.column));
+            return Err(format!("第 {} 行: 字符串未闭合", self.line));
         }
-        
-        self.advance(); // 跳过结束引号
+        self.advance();
         Ok(Token::String(value))
     }
-    
-    fn scan_number(&mut self) -> Result<Token, String> {
+
+    fn scan_number(&mut self, negative: bool) -> Result<Token, String> {
         let mut number = String::new();
-        
-        // 处理负号
-        if self.current_char() == '-' {
-            number.push(self.advance());
+        if negative {
+            number.push('-');
         }
-        
         while !self.is_at_end() && self.current_char().is_ascii_digit() {
             number.push(self.advance());
         }
-        
-        number.parse::<i64>()
+        if self.current_char() == '.' && self.peek_char().is_ascii_digit() {
+            number.push(self.advance());
+            while !self.is_at_end() && self.current_char().is_ascii_digit() {
+                number.push(self.advance());
+            }
+            return number
+                .parse::<f64>()
+                .map(Token::Float)
+                .map_err(|_| format!("第 {} 行: 无效的数字 '{number}'", self.line));
+        }
+        number
+            .parse::<i64>()
             .map(Token::Number)
-            .map_err(|_| format!("第 {} 行第 {} 列: 无效的数字 '{}'", self.line, self.column, number))
+            .map_err(|_| format!("第 {} 行: 无效的数字 '{number}'", self.line))
     }
-    
+
     fn scan_identifier(&mut self) -> Result<Token, String> {
         let mut ident = String::new();
-        
         while !self.is_at_end() {
             let ch = self.current_char();
             if ch.is_alphanumeric() || ch == '_' {
@@ -397,47 +391,80 @@ impl Lexer {
                 break;
             }
         }
-        
-        // 识别关键字
         let token = match ident.as_str() {
             "set" => Token::Set,
             "env" => Token::Env,
-            "IF" => Token::If,
-            "ELIF" => Token::Elif,
-            "ELSE" => Token::Else,
+            "if" => Token::If,
+            "elif" => Token::Elif,
+            "else" => Token::Else,
             "lib" => Token::Lib,
             "repo" => Token::Repo,
-            "LOG" => Token::Log,
-            "INIT" => Token::Init,
-            "INFO" => Token::Info,
-            "ERROR" => Token::Error,
-            "DATA" => Token::Data,
-            "DO" => Token::Do,
-            "PIPE" => Token::Pipe,
-            "RE" => Token::Re,
-            "COMM" => Token::Comm,
-            "ACTION" => Token::Action,
-            "CMD" => Token::Cmd,
-            "PRINT" => Token::Print,
-            "DOING" => Token::Doing,
-            "AWAIT" => Token::Await,
-            "FILES" => Token::Files,
-            "ALL" => Token::All,
-            "ENCRY" => Token::Encry,
-            "CATCH" => Token::Catch,
-            "VALI" => Token::Vali,
-            "SERIA" => Token::Seria,
-            "DESERIA" => Token::Deseria,
-            "COMP" => Token::Comp,
-            "DECOMP" => Token::Decomp,
-            "JSON" => Token::Json,
-            "BIN" => Token::Bin,
+            "use" => Token::Use,
+            "action" => Token::Action,
+            "struct" => Token::Struct,
+            "pipe" => Token::Pipe,
+            "each" => Token::Each,
+            "as" => Token::As,
+            "in" => Token::In,
+            "print" => Token::Print,
+            "doing" => Token::Doing,
+            "await" => Token::Await,
+            "url" => Token::Url,
+            "dir" => Token::Dir,
+            "serve" => Token::Serve,
+            "route" => Token::Route,
+            "catch" => Token::Catch,
+            "stop" => Token::Stop,
+            "error" => Token::Error,
+            "num" => Token::Num,
+            "str" => Token::Str,
             "true" => Token::Bool(true),
             "false" => Token::Bool(false),
+            "files" => Token::Ident("files".into()),
             _ => Token::Ident(ident),
         };
-        
         Ok(token)
+    }
+
+    fn is_at_end(&self) -> bool {
+        self.position >= self.input.len()
+    }
+
+    fn current_char(&self) -> char {
+        if self.is_at_end() {
+            '\0'
+        } else {
+            self.input[self.position]
+        }
+    }
+
+    fn peek_char(&self) -> char {
+        self.input.get(self.position + 1).copied().unwrap_or('\0')
+    }
+
+    fn advance(&mut self) -> char {
+        if self.is_at_end() {
+            return '\0';
+        }
+        let ch = self.input[self.position];
+        self.position += 1;
+        self.column += 1;
+        ch
+    }
+
+    fn skip_spaces(&mut self) {
+        while self.current_char() == ' ' || self.current_char() == '\r' {
+            self.advance();
+        }
+    }
+
+    fn scan_comment(&mut self) -> Result<Token, String> {
+        self.advance();
+        let mut comment = String::new();
+        while !self.is_at_end() && self.current_char() != '\n' {
+            comment.push(self.advance());
+        }
+        Ok(Token::Comment(comment.trim().to_string()))
     }
 }
 
@@ -447,50 +474,34 @@ mod tests {
 
     #[test]
     fn test_lexer_basic() {
-        let mut lexer = Lexer::new("set(KEY, \"value\")");
+        let mut lexer = Lexer::new("set(key, \"value\")");
         assert_eq!(lexer.next_token().unwrap(), Token::Set);
         assert_eq!(lexer.next_token().unwrap(), Token::LParen);
-        assert_eq!(lexer.next_token().unwrap(), Token::Ident("KEY".to_string()));
-        assert_eq!(lexer.next_token().unwrap(), Token::Comma);
-        assert_eq!(lexer.next_token().unwrap(), Token::String("value".to_string()));
-        assert_eq!(lexer.next_token().unwrap(), Token::RParen);
+        assert_eq!(lexer.next_token().unwrap(), Token::Ident("key".into()));
     }
 
     #[test]
-    fn test_lexer_numbers() {
-        let mut lexer = Lexer::new("42 -10");
-        assert_eq!(lexer.next_token().unwrap(), Token::Number(42));
-        assert_eq!(lexer.next_token().unwrap(), Token::Number(-10));
+    fn test_path_sep_and_indent() {
+        let mut lexer = Lexer::new("action clean(file):\n    print(${file})\n");
+        assert_eq!(lexer.next_token().unwrap(), Token::Action);
+        let tokens = lexer.tokenize().unwrap();
+        assert!(tokens.iter().any(|(token, _, _)| *token == Token::Indent));
+        assert!(tokens.iter().any(|(token, _, _)| *token == Token::Dedent));
     }
 
     #[test]
-    fn test_lexer_keywords() {
-        let mut lexer = Lexer::new("IF ELIF ELSE true false");
+    fn test_keywords_lowercase() {
+        let mut lexer = Lexer::new("if elif else");
         assert_eq!(lexer.next_token().unwrap(), Token::If);
         assert_eq!(lexer.next_token().unwrap(), Token::Elif);
         assert_eq!(lexer.next_token().unwrap(), Token::Else);
-        assert_eq!(lexer.next_token().unwrap(), Token::Bool(true));
-        assert_eq!(lexer.next_token().unwrap(), Token::Bool(false));
     }
 
     #[test]
-    fn test_lexer_comment() {
-        let mut lexer = Lexer::new("# This is a comment\nset");
-        assert!(matches!(lexer.next_token().unwrap(), Token::Comment(_)));
-        assert_eq!(lexer.next_token().unwrap(), Token::Newline);
-        assert_eq!(lexer.next_token().unwrap(), Token::Set);
-    }
-
-    #[test]
-    fn test_lexer_operators() {
-        let mut lexer = Lexer::new("== != > < >= <= && ||");
-        assert_eq!(lexer.next_token().unwrap(), Token::Eq);
-        assert_eq!(lexer.next_token().unwrap(), Token::Ne);
-        assert_eq!(lexer.next_token().unwrap(), Token::Gt);
-        assert_eq!(lexer.next_token().unwrap(), Token::Lt);
-        assert_eq!(lexer.next_token().unwrap(), Token::Ge);
-        assert_eq!(lexer.next_token().unwrap(), Token::Le);
-        assert_eq!(lexer.next_token().unwrap(), Token::And);
-        assert_eq!(lexer.next_token().unwrap(), Token::Or);
+    fn test_path_sep() {
+        let mut lexer = Lexer::new("tools::pack");
+        assert_eq!(lexer.next_token().unwrap(), Token::Ident("tools".into()));
+        assert_eq!(lexer.next_token().unwrap(), Token::PathSep);
+        assert_eq!(lexer.next_token().unwrap(), Token::Ident("pack".into()));
     }
 }

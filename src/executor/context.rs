@@ -44,6 +44,10 @@ impl ExecutionContext {
     }
     
     /// 设置局部变量
+    pub fn local_vars_remove(&mut self, key: &str) {
+        self.local_vars.remove(key);
+    }
+
     pub fn set_local(&mut self, key: String, value: Value) {
         self.local_vars.insert(key, value);
     }
